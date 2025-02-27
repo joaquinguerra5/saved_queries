@@ -1,0 +1,130 @@
+DECLARE day DATE DEFAULT DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY);
+
+
+
+WITH
+products AS 
+
+/* TRAE PARA TODOS LOS PARTNERS DE AAA TAGEADOS PARA LA FECHA "day" LOS DISTINTOS PRODUCTOS CATALOGADOS 1 MES HACIA ATRAS HASTA LA FECHA "day" */
+(
+  SELECT
+    DISTINCT
+    aaa.* EXCEPT(snapshot_date),
+    dvps.remote_product_id as product_id,
+    -- dvps.barcodes,
+    ARRAY_AGG(dvps.master_code ORDER BY dvps.snapshot_date DESC)[OFFSET(0)] as master_code,
+    -- dvps.sku,
+    -- dvps.product_name
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  INNER JOIN
+    (SELECT * FROM`peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` WHERE snapshot_date = day) aaa
+  ON
+    aaa.partner_id = dvps.remote_vendor_id
+  WHERE
+    dvps.snapshot_date BETWEEN DATE_SUB(day,INTERVAL 1 MONTH) AND day
+  GROUP BY
+    ALL
+  
+),
+
+promos AS (
+  /* TRAE TODOS LOS PRODUCTOS CON PROMO EN LA FECHA "day" QUE HAYAN ESTADO ACTIVOS (segun dim_vendor_product) O HAYAN TENIDO AL MENOS 1 ÓRDEN (no estaban activos segun dim_vendor_product pero seguramente en algun momento se prendieron) */
+  SELECT
+    DISTINCT
+    pp.partner_id,
+    pp.remote_product_id,
+    --pp.master_code
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.AAA_pivot_promos` pp
+  WHERE
+    snapshot_date = day
+  AND
+    (product_is_active OR orders > 0)
+),
+
+orders AS (
+  /* AGRUPA POR PRODUCTO (aaa.partner_id, d.product.product_id) EL GFV CONFIRMADO EN EUROS PARA EL PERÍODO DESDE 3 MESES HACIA ATRAS Y HASTA "day" */
+  SELECT
+    aaa.*,
+    d.product.product_id,
+    -- fo.order_id,
+    -- d.product.product_id,
+    -- d.product.name as product_name,
+    SUM(d.total/rate_eu) as product_gfv_eu
+  FROM
+    `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+  INNER JOIN
+    (SELECT * FROM`peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` WHERE snapshot_date = day) aaa
+  ON
+    aaa.partner_id = fo.restaurant.id
+  -- LEFT JOIN
+  --   products p
+  -- ON
+  --   p.partner_id = fo.restaurant.id AND p.product_id = d.product.product_id
+  LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_currency_exchange` AS dim_currency_exchange
+  ON
+    dim_currency_exchange.currency_exchange_date = DATE_TRUNC(fo.registered_date, month)
+    AND dim_currency_exchange.currency_id = restaurant.country.currency.id
+  WHERE
+    fo.registered_date BETWEEN DATE_SUB(day,INTERVAL 3 MONTH) AND day
+  AND
+    order_status = 'CONFIRMED'
+  GROUP BY
+    ALL
+),
+
+-- SELECT
+--   *
+-- FROM
+--   orders
+
+
+
+product_summary AS 
+/* CRUZAMOS LAS 3 SUBQUERIES ANTERIORES. PARTIENDO DE TODOS LOS PRODUCTOS CATALOGADOS EN EL MES, OBTENEMOS UN FLAG SI ESTUVO EN PROMO ACTIVA EL DÍA "day", EL GFV GENERADO EN LOS ÚLTIMOS 3 MESES Y EL SHARE DE ESE PRODUCTO EN EL GFV DEL PARTNER EN EL MISMO PERÍODO  */
+(SELECT
+  p.*,
+  SUM(product_gfv_eu) OVER(PARTITION BY p.partner_id) as total_gfv,
+  ROUND(COALESCE(SAFE_DIVIDE(o.product_gfv_eu,SUM(product_gfv_eu) OVER(PARTITION BY p.partner_id)),0),5) as gfv_incidence,
+  CASE 
+    WHEN promos.remote_product_id IS NOT NULL THEN 1
+    ELSE 0
+  END as has_promo,
+  COALESCE(CASE 
+    WHEN promos.remote_product_id IS NOT NULL THEN 1
+    ELSE 0
+  END * COALESCE(SAFE_DIVIDE(o.product_gfv_eu,SUM(product_gfv_eu) OVER(PARTITION BY o.partner_id)),0),0) as daily_ppp_weighted
+FROM
+  products p
+LEFT JOIN
+  orders o
+ON
+  o.partner_id = p.partner_id AND o.product_id = p.product_id 
+LEFT JOIN
+  promos
+ON
+  promos.partner_id = p.partner_id AND promos.remote_product_id = p.product_id
+ORDER BY
+  gfv_incidence DESC
+)
+
+-- SELECT
+--   *
+-- FROM
+--   product_summary
+-- WHERE
+--   partner_id = 464450  
+
+SELECT
+  /*AGRUPAMOS POR PARTNER Y FECHA ("day") Y OBTENEMOS "daily_ppp_weighted" COMO LA SUMA DE LA INCIDENCIA EN EL GPV TOTAL DE LOS PRODUCTOS QUE ESTUVIERON EN PROMO ACTIVA ESE DÍA*/
+  day as snapshot_date,
+  franchise,
+  partner_id,
+  ROUND(SUM(gfv_incidence),2) as check_gfv_incidence,
+  ROUND(SUM(daily_ppp_weighted),2) as daily_ppp_weighted
+FROM
+  product_summary
+GROUP BY
+  ALL
