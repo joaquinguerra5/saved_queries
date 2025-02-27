@@ -10,19 +10,20 @@ products AS
   SELECT
     DISTINCT
     aaa.* EXCEPT(snapshot_date),
-    dvps.remote_product_id as product_id,
+    dvp.remote_product_id as product_id,
     -- dvps.barcodes,
-    ARRAY_AGG(dvps.master_code ORDER BY dvps.snapshot_date DESC)[OFFSET(0)] as master_code,
+    dvp.master_code,
     -- dvps.sku,
     -- dvps.product_name
   FROM
-    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+    --CRITERIO `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvp
   INNER JOIN
     (SELECT * FROM`peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` WHERE snapshot_date = day) aaa
   ON
-    aaa.partner_id = dvps.remote_vendor_id
+    aaa.partner_id = dvp.remote_vendor_id
   WHERE
-    dvps.snapshot_date BETWEEN DATE_SUB(day,INTERVAL 1 MONTH) AND day
+    dvp.snapshot_date = day
   GROUP BY
     ALL
   
@@ -48,9 +49,6 @@ orders AS (
   SELECT
     aaa.*,
     d.product.product_id,
-    -- fo.order_id,
-    -- d.product.product_id,
-    -- d.product.name as product_name,
     SUM(d.total/rate_eu) as product_gfv_eu
   FROM
     `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
@@ -58,10 +56,6 @@ orders AS (
     (SELECT * FROM`peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` WHERE snapshot_date = day) aaa
   ON
     aaa.partner_id = fo.restaurant.id
-  -- LEFT JOIN
-  --   products p
-  -- ON
-  --   p.partner_id = fo.restaurant.id AND p.product_id = d.product.product_id
   LEFT JOIN
   `peya-bi-tools-pro.il_core.dim_currency_exchange` AS dim_currency_exchange
   ON
@@ -110,18 +104,15 @@ ORDER BY
   gfv_incidence DESC
 )
 
--- SELECT
---   *
--- FROM
---   product_summary
--- WHERE
---   partner_id = 464450  
 
 SELECT
   /*AGRUPAMOS POR PARTNER Y FECHA ("day") Y OBTENEMOS "daily_ppp_weighted" COMO LA SUMA DE LA INCIDENCIA EN EL GPV TOTAL DE LOS PRODUCTOS QUE ESTUVIERON EN PROMO ACTIVA ESE DÍA*/
   day as snapshot_date,
+  cc,
   franchise,
+  franchise_id,
   partner_id,
+  partner_name,
   ROUND(SUM(gfv_incidence),2) as check_gfv_incidence,
   ROUND(SUM(daily_ppp_weighted),2) as daily_ppp_weighted
 FROM
