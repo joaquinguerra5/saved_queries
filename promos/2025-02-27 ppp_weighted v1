@@ -1,12 +1,14 @@
 DECLARE day DATE DEFAULT DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY);
 
-CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.aaa_weighted_ppp_daily`
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.aaa_weighted_ppp_daily`
 
-PARTITION BY snapshot_date
+-- PARTITION BY snapshot_date
 
-CLUSTER BY cc, franchise, partner_id
+-- CLUSTER BY cc, franchise, partner_id
 
-AS
+-- AS
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.aaa_weighted_ppp_daily`
 
 
 
@@ -32,6 +34,8 @@ products AS
     aaa.partner_id = dvp.remote_vendor_id
   WHERE
     dvp.snapshot_date = day
+  AND
+    dvp.product_is_active
   GROUP BY
     ALL
   
