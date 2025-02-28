@@ -1,0 +1,58 @@
+WITH products AS 
+(
+SELECT
+  dvps.remote_vendor_id,
+  dvps.remote_product_id,
+  sku,
+  MAX(dvps.product_name) as product_name,
+  MAX(CASE WHEN dvps.snapshot_date = '2025-02-09' THEN maximum_sales_quantity END) as prev_max_qty,
+  MAX(CASE WHEN dvps.snapshot_date = '2025-02-13' THEN maximum_sales_quantity END) as act_max_qty, 
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+INNER JOIN
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+  aaa.partner_id = dvps.remote_vendor_id
+WHERE
+  dvps.snapshot_date BETWEEN '2025-02-09' AND '2025-02-13'
+AND
+  aaa.franchise = 'Carrefour-AR'
+GROUP BY ALL
+HAVING
+  MAX(CASE WHEN dvps.snapshot_date = '2025-02-09' THEN maximum_sales_quantity END) != MAX(CASE WHEN dvps.snapshot_date = '2025-02-13' THEN maximum_sales_quantity END)
+),
+
+ordenes as
+(SELECT
+  fo.id as order_id,
+  fo.state,
+  p.*,
+  d.quantity,
+  d.product.unit_price,
+  p.prev_max_qty * d.product.unit_price as gfv_topped,
+  d.quantity * d.product.unit_price as gfv_non_topped
+FROM
+  `peya-data-origins-pro.cl_core.orders_service` fo, UNNEST(details) d
+INNER JOIN
+  products p
+ON
+  p.remote_vendor_id = fo.vendor.id AND d.product.id = p.remote_product_id
+WHERE
+  DATE(fo.registered_date) >= '2025-02-13'
+AND
+  prev_max_qty < d.quantity
+AND
+  prev_max_qty > 0
+)
+
+SELECT
+  COUNT(DISTINCT order_id) as orders,
+  SUM(gfv_topped) as gfv_topped,
+  SUM(gfv_non_topped) as gfv_non_topped,
+  SUM(gfv_non_topped) - SUM(gfv_topped) as incr_gfv
+  -- *,
+  -- gfv_non_topped-gfv_topped as inc_gfv
+FROM
+  ordenes
+WHERE
+  state = 'CONFIRMED'

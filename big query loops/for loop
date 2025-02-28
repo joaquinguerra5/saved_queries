@@ -1,0 +1,693 @@
+DECLARE d_30 DATE DEFAULT "2024-07-01"; 
+
+FOR un_dia IN (select dias from unnest(generate_array(00,1)) dias)
+  DO
+
+
+CREATE TEMP TABLE fact_orders AS (
+  SELECT
+      fo.registered_date as date
+    , CASE WHEN extract (hour FROM fo.registered_at) >= 8 and extract (hour FROM fo.registered_at) < 13  THEN 'morning' 
+           WHEN extract (hour FROM fo.registered_at) >= 13 and extract (hour FROM fo.registered_at) < 19 THEN 'afternoon' 
+           WHEN extract (hour FROM fo.registered_at) >= 19 and extract (hour FROM fo.registered_at) < 24  THEN 'night'
+           WHEN extract (hour FROM fo.registered_at) >= 0 and extract (hour FROM fo.registered_at) < 8  THEN 'night'
+                                                                                                         ELSE NULL 
+                                                                                                         END as moment
+    , fo.restaurant.id as partner_id
+    , fo.country.country_code as country_code
+    , fo.city.city_name as city_name
+    , us.user_segment
+    , d.order_id as order_id
+    , d.product.product_id as product_id
+    , d.quantity as quantity_sold
+    , d.total as value_sold
+    , dvp.master_category_names.level_one as level_one
+    , dvp.master_category_names.level_two as level_two
+    , dvp.master_category_names.level_three as level_three
+          
+  FROM `peya-bi-tools-pro.il_core.fact_orders` fo
+  LEFT JOIN UNNEST(details) as d
+
+  LEFT JOIN `peya-bi-tools-pro.il_qcommerce.fact_user_segmentation_snapshot` us
+    ON  us.user_id = fo.user.id
+        AND us.snapshot_date = date_trunc(fo.registered_date, month)
+
+  LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp 
+    ON CAST(d.product.product_id AS STRING) = CAST(dvp.remote_product_id AS STRING)  
+  
+  WHERE DATE(fo.registered_date) = DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64) DAY) 
+  --AND DATE(fo.registered_date) < DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64)+1 DAY) 
+  AND fo.order_status = "CONFIRMED" AND us.snapshot_date >= "2024-01-01"
+)
+;
+
+CREATE TEMP TABLE campaigns AS (
+  SELECT  
+     c.start_timestamp
+    ,c.expire_timestamp
+          
+    ,c.country_code
+    ,dp.city.name as city_name
+    ,c.partner_id
+    ,c.partner_name
+    ,c.is_aaa
+    ,c.is_dmart
+
+    , DATE(start_timestamp) as start_date
+    , DATE(expire_timestamp) as end_date
+          
+    ,c.campaign_id
+    ,c.incentive_type
+    ,c.campaign_type
+    ,c.campaign_subtype
+    ,c.product_discount_type
+    ,c.target_audience
+    ,c.platform_purpose
+          
+    ,c.product_name
+    ,dvp.remote_product_id as product_id
+    ,c.global_product_id
+    ,c.sku
+    ,dvp.master_code
+    ,dvp.barcodes
+
+    ,dvp.master_category_names.level_one as level_one 
+    ,dvp.master_category_names.level_two as level_two
+    ,dvp.master_category_names.level_three as level_three
+          
+    ,c.original_price_lc
+    ,CASE WHEN c.discounted_amount_lc >= 0 THEN c.discounted_amount_lc
+          WHEN c.discounted_amount_lc < 0  THEN -c.discounted_amount_lc
+          ELSE NULL END AS discounted_amount_lc    
+    --c.discounted_price_lc
+    ,CASE WHEN c.min_trigger_qty_product_discount >= 0 THEN c.min_trigger_qty_product_discount
+          WHEN c.min_trigger_qty_product_discount < 0  THEN -c.min_trigger_qty_product_discount
+          ELSE NULL END AS min_trigger_qty_product_discount
+    ,c.discount_usage_limit
+
+    FROM (SELECT DISTINCT * FROM `peya-bi-tools-pro.il_qcommerce.promo_tool_campaigns_v2` WHERE sku IS NOT NULL AND create_date >= "2023-01-01") c
+
+    LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp 
+      ON CAST(c.global_product_id AS STRING) = CAST(dvp.global_product_id AS STRING)
+        AND c.partner_id = dvp.remote_vendor_id
+
+    LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` dp
+      ON  c.partner_id = dp.partner_id
+        
+   WHERE RANGE_CONTAINS(RANGE(DATE(c.start_timestamp), DATE_ADD(DATE(c.expire_timestamp), INTERVAL 1 DAY)), DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64) DAY)) -- usar esta cuando se arme la qat diaria o alternativamente usar el rango -1 todaday, +1 today
+  --         AND c.sku IS NOT NULL AND dvp.barcodes IS NOT NULL
+/*
+  WHERE
+   RANGE_OVERLAPS(RANGE(DATE(c.start_timestamp), 
+   DATE_ADD(DATE(c.expire_timestamp), INTERVAL 1 DAY)), 
+   RANGE(DATE(DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64) DAY)), 
+   DATE_ADD(DATE(DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64)+1 DAY)), INTERVAL 1 DAY))) 
+*/
+          AND dvp.barcodes IS NOT NULL AND dvp.remote_product_id is not null
+          -- AND c.sku IS NOT NULL AND dvp.barcodes IS NOT NULL
+          -- AND c.create_date >= "2023-01-01"
+
+-- Note that the interval is left closed, right open (so left bound is included while the right one not). POR ESO SON IGUALES LOS ÚLTIMOS DOS
+
+)
+;
+-- Campañas
+CREATE TEMP TABLE campaigns_disaggregated AS (
+  SELECT  
+     date
+    ,c.start_date
+    ,c.end_date
+    -- , CASE WHEN moment = 1 then "night" 
+    --        WHEN moment = 2 then "afternoon" 
+    --        WHEN moment = 3 then "morning" 
+    --        ELSE NULL END as moment
+    ,moment
+          
+    ,c.country_code
+    ,c.city_name
+    ,c.partner_id
+    ,c.partner_name
+    ,c.is_aaa
+    ,c.is_dmart
+          
+    ,c.campaign_id
+    ,c.incentive_type
+    ,c.campaign_type
+    ,c.campaign_subtype
+    ,c.product_discount_type
+    ,c.target_audience
+    ,c.platform_purpose
+
+    ,user_segment as user_segment          
+    -- ,CASE WHEN user_segment = 1 THEN "new" 
+    --         WHEN user_segment = 2 THEN "occasional" 
+    --         WHEN user_segment = 3 THEN "stable" 
+    --                               ELSE NULL END as user_segment
+
+    ,c.product_name
+    -- ,c.remote_product_id as product_id
+    ,c.product_id
+    ,c.sku
+    ,c.master_code
+    ,c.barcodes
+    -- ,c.master_category_names.level_one as level_one 
+    -- ,c.master_category_names.level_two as level_two
+    -- ,c.master_category_names.level_three as level_three
+    ,c.level_one 
+    ,c.level_two
+    ,c.level_three
+    
+
+    ,c.original_price_lc
+    ,c.discounted_amount_lc
+    ,c.original_price_lc - c.discounted_amount_lc as discounted_price_lc
+    ,c.min_trigger_qty_product_discount
+    ,c.discount_usage_limit
+
+  FROM campaigns c, 
+  UNNEST(GENERATE_DATE_ARRAY(DATE(c.start_timestamp), DATE(c.expire_timestamp), INTERVAL 1 DAY)) AS date,
+  UNNEST(["morning", "afternoon", "night"]) as moment,
+  UNNEST(["new", "occasional", "stable"]) as user_segment
+
+  -- LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp 
+  --   ON CAST(c.global_product_id AS STRING) = CAST(dvp.global_product_id AS STRING)
+  --     AND c.partner_id = dvp.remote_vendor_id
+
+  -- WHERE dvp.barcodes IS NOT NULL
+  WHERE date = DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64) DAY) 
+  --AND date < DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64)+1 DAY)
+    AND c.original_price_lc > 0 AND c.original_price_lc > c.discounted_amount_lc  AND discounted_amount_lc != 0
+
+  ORDER BY c.country_code, c.partner_id, c.global_product_id, date
+)
+;
+-- Informacion de ordenes con productos en campaña
+CREATE TEMP TABLE vendor_order_campaigns AS(
+  SELECT
+      date
+    , moment
+    , partner_id
+    , user_segment
+    , order_id
+    -- , MAX(campaign_id) as has_product_campaign
+    , SAFE_CAST(ROUND(SUM(quantity_sold), 0) AS INT64) as order_quantity_sold
+    , SAFE_CAST(ROUND(SUM(value_sold), 0) AS INT64) as order_value_sold
+
+  FROM ( 
+          SELECT fo.* FROM fact_orders fo
+            
+          INNER JOIN 
+          (SELECT DISTINCT order_id FROM `peya-bi-tools-pro.il_qcommerce.promo_tool_transactions_v2` 
+          WHERE registered_date = DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64) DAY) 
+          --AND registered_date < DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64)+1 DAY)
+          ) co
+            ON SAFE_CAST(fo.order_id AS STRING) = SAFE_CAST(co.order_id AS STRING)
+            -- fo.registered_date = c.date AND fo.partner_id = c.partner_id AND fo.d.product.product_id = c.product_id
+          )
+  GROUP BY 1, 2, 3, 4, 5
+)
+
+-- Ventas de productos en campaña
+;
+CREATE TEMP TABLE campaign_orders as(
+  SELECT  
+    t.registered_date as date
+
+    ,fo.moment
+    ,t.country_code
+    ,t.campaign_id
+            
+    ,t.partner_id
+    ,t.partner_name
+    ,t.is_aaa
+    ,t.is_dmart
+
+    ,fo.user_segment
+
+    ,t.incentive_type
+    ,t.campaign_type
+    ,t.campaign_subtype
+    ,t.product_discount_type
+
+    ,t.target_audience
+    ,t.product_name
+    ,dvp.remote_product_id as product_id
+    ,t.sku
+    ,dvp.master_code
+    ,dvp.barcodes
+
+    ,COUNT(DISTINCT(t.order_id)) AS number_orders
+    ,COUNT(DISTINCT(t.user_id)) AS number_users
+    ,ARRAY_AGG(DISTINCT(t.user_id)) AS distinct_user_id
+    ,ARRAY_AGG(DISTINCT(t.order_id)) AS distinct_order_id
+
+    ,SAFE_CAST(ROUND(SUM(voc.order_quantity_sold), 0) AS INT64) AS volume_orders
+    ,SAFE_CAST(ROUND(SUM(voc.order_value_sold), 0) AS INT64) AS value_orders
+
+    ,SAFE_CAST(ROUND(SUM(t.qty_sold), 0) AS INT64) AS product_volume
+    ,SAFE_CAST(ROUND(SUM(t.qty_sold_with_discount_applied), 0) AS INT64) AS product_discounted_volume 
+    
+    ,SAFE_CAST(ROUND(SUM(t.qty_sold_price), 0) AS INT64) AS product_value 
+    ,SAFE_CAST(ROUND(SUM(t.qty_sold_discount_amount), 0) AS INT64) AS product_dicount_value 
+    ,SAFE_CAST(ROUND(SUM(t.qty_sold_discounted_price), 0) AS INT64) AS product_net_value	
+
+  FROM `peya-bi-tools-pro.il_qcommerce.promo_tool_transactions_v2` t
+  
+  LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp 
+    ON CAST(t.platform_product_id AS STRING) = CAST(dvp.remote_product_id AS STRING)
+  
+  LEFT JOIN vendor_order_campaigns voc
+    ON SAFE_CAST(t.order_id AS STRING) = SAFE_CAST(voc.order_id AS STRING)
+  
+  LEFT JOIN (
+              SELECT 
+                  fo.date
+                , fo.order_id
+                , fo.moment
+                , fo.user_segment
+
+             FROM fact_orders fo
+              ) fo
+
+    ON SAFE_CAST(t.order_id AS STRING) = SAFE_CAST(fo.order_id AS STRING)
+
+  WHERE t.registered_date = DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64) DAY) 
+  --AND t.registered_date < DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64)+1 DAY) 
+  AND dvp.barcodes IS NOT NULL
+  GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18 ,19    
+)
+--tipo de cambio para llevar todo a euros
+;
+CREATE TEMP TABLE exchange_rate AS (
+  SELECT 
+      LOWER(dc.country_code) as country_code
+    , dc.currency_id
+    , dce.currency_exchange_date  
+    , dce.rate_eu
+  FROM `peya-bi-tools-pro.il_core.dim_country` dc
+
+  LEFT JOIN (
+    SELECT 
+      dce.currency_id
+    , dce.rate_eu
+    , dce.currency_exchange_date
+    FROM `peya-bi-tools-pro.il_core.dim_currency_exchange` dce
+    WHERE currency_exchange_date >= DATE_ADD(d_30, INTERVAL CAST(un_dia.dias as INT64) DAY)
+    ) dce
+      ON dc.currency_id = dce.currency_id 
+)
+;
+-- Ventas del partner
+CREATE TEMP TABLE  partner_orders AS(
+  SELECT
+      date
+    , moment
+    , partner_id
+    , user_segment
+    , COUNT(DISTINCT order_id) AS partner_number_orders
+    , SAFE_CAST(ROUND(SUM(order_quantity_sold), 0) AS INT64)  AS partner_volume_orders
+    , SAFE_CAST(ROUND(SUM(order_value_sold), 0) AS INT64) AS partner_value_orders
+  FROM (
+    SELECT
+        date
+      , partner_id
+      , order_id
+      , moment
+      , user_segment
+      , ROUND(SUM(quantity_sold), 0) as order_quantity_sold
+      , ROUND(SUM(value_sold), 0) as order_value_sold
+    FROM ( 
+      SELECT
+          fo.date
+        , fo.moment
+        , fo.partner_id
+        , fo.user_segment
+        , fo.order_id
+        , fo.product_id
+        , fo.quantity_sold
+        , fo.value_sold
+          
+      FROM fact_orders fo
+        )
+    GROUP BY 1, 2, 3, 4, 5
+    )
+  GROUP BY 1, 2, 3, 4
+)
+; 
+CREATE TEMP TABLE  
+-- Ventas del partner en la correspondiente master category 3
+partner_master_category_three_orders AS (
+  SELECT
+      date
+    , moment
+    , partner_id
+    , user_segment
+    , level_one
+    , level_two
+    , level_three
+    , COUNT(DISTINCT order_id) as partner_number_orders_l3
+    , SAFE_CAST(ROUND(SUM(quantity_sold), 0) AS INT64) as partner_volume_orders_l3
+    , SAFE_CAST(ROUND(SUM(value_sold), 0) AS INT64) as partner_value_orders_l3
+        
+  FROM ( 
+    SELECT
+        fo.date
+      , fo.moment
+      , fo.partner_id
+      , fo.user_segment
+      , fo.order_id
+      , fo.product_id
+      , fo.quantity_sold
+      , fo.value_sold
+      , fo.level_one
+      , fo.level_two
+      , fo.level_three
+          
+    FROM fact_orders fo                        
+    )
+      
+  GROUP BY 1, 2, 3, 4, 5, 6, 7
+)
+;
+CREATE TEMP TABLE 
+-- Ventas del partner en la correspondiente master category 2
+partner_master_category_two_orders AS (
+  SELECT
+      date
+    , moment
+    , partner_id
+    , user_segment
+    , level_one
+    , level_two
+    , COUNT(DISTINCT order_id) as partner_number_orders_l2
+    , SAFE_CAST(ROUND(SUM(quantity_sold), 0) AS INT64) as partner_volume_orders_l2
+    , SAFE_CAST(ROUND(SUM(value_sold), 0) AS INT64) as partner_value_orders_l2
+        
+  FROM ( 
+    SELECT
+        fo.date
+      , fo.moment
+      , fo.partner_id
+      , fo.user_segment
+      , fo.order_id
+      , fo.product_id
+      , fo.quantity_sold
+      , fo.value_sold
+      , fo.level_one
+      , fo.level_two
+      , fo.level_three
+          
+    FROM fact_orders fo                        
+    )
+      
+  GROUP BY 1, 2, 3, 4, 5, 6
+)
+; CREATE TEMP TABLE
+-- Ventas del partner en la correspondiente master category 1
+partner_master_category_one_orders AS (
+  SELECT
+      date
+    , moment
+    , partner_id
+    , user_segment
+    , level_one
+    , COUNT(DISTINCT order_id) as partner_number_orders_l1
+    , SAFE_CAST(ROUND(SUM(quantity_sold), 0) AS INT64) as partner_volume_orders_l1
+    , SAFE_CAST(ROUND(SUM(value_sold), 0) AS INT64) as partner_value_orders_l1
+        
+  FROM ( 
+    SELECT
+        fo.date
+      , fo.moment
+      , fo.partner_id
+      , fo.user_segment
+      , fo.order_id
+      , fo.product_id
+      , fo.quantity_sold
+      , fo.value_sold
+      , fo.level_one
+      , fo.level_two
+      , fo.level_three
+          
+    FROM fact_orders fo                        
+    )
+      
+  GROUP BY 1, 2, 3, 4, 5
+)
+; CREATE TEMP TABLE
+-- Ventas en la correspondiente master category 3
+master_category_three_orders AS (
+SELECT
+    date
+  , moment
+  , country_code
+  , city_name
+  , user_segment
+  , level_one
+  , level_two
+  , level_three
+  , COUNT(DISTINCT order_id) as number_orders_l3
+  , SAFE_CAST(ROUND(SUM(quantity_sold), 0) AS INT64) as volume_orders_l3
+  , SAFE_CAST(ROUND(SUM(value_sold), 0) AS INT64) as value_orders_l3
+        
+FROM ( 
+  SELECT
+      fo.date
+    , fo.country_code
+    , fo.city_name
+    , fo.moment
+    , fo.partner_id
+    , fo.user_segment
+    , fo.order_id
+    , fo.product_id
+    , fo.quantity_sold
+    , fo.value_sold
+    , fo.level_one
+    , fo.level_two
+    , fo.level_three
+          
+    FROM fact_orders fo
+         
+  )
+      
+  GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+)
+;
+CREATE TEMP TABLE
+-- Ventas en la correspondiente master category 2
+master_category_two_orders AS (
+SELECT
+    date
+  , moment
+  , country_code
+  , city_name
+  , user_segment
+  , level_one
+  , level_two
+  , COUNT(DISTINCT order_id) as number_orders_l2
+  , SAFE_CAST(ROUND(SUM(quantity_sold), 0) AS INT64) as volume_orders_l2
+  , SAFE_CAST(ROUND(SUM(value_sold), 0) AS INT64) as value_orders_l2
+        
+FROM ( 
+  SELECT
+      fo.date
+    , fo.moment
+    , fo.country_code
+    , fo.city_name
+    , fo.partner_id
+    , fo.user_segment
+    , fo.order_id
+    , fo.product_id
+    , fo.quantity_sold
+    , fo.value_sold
+    , fo.level_one
+    , fo.level_two
+    , fo.level_three
+          
+    FROM fact_orders fo
+         
+  )
+      
+  GROUP BY 1, 2, 3, 4, 5, 6, 7
+)
+;
+CREATE TEMP TABLE
+-- Ventas en la correspondiente master category 1
+master_category_one_orders AS (
+SELECT
+    date
+  , moment
+  , country_code
+  , city_name
+  , user_segment
+  , level_one
+  , COUNT(DISTINCT order_id) as number_orders_l1
+  , SAFE_CAST(ROUND(SUM(quantity_sold), 0) AS INT64) as volume_orders_l1
+  , SAFE_CAST(ROUND(SUM(value_sold), 0) AS INT64) as value_orders_l1
+        
+FROM ( 
+  SELECT
+      fo.date
+    , fo.moment
+    , fo.country_code
+    , fo.city_name
+    , fo.partner_id
+    , fo.user_segment
+    , fo.order_id
+    , fo.product_id
+    , fo.quantity_sold
+    , fo.value_sold
+    , fo.level_one
+    , fo.level_two
+    , fo.level_three
+          
+    FROM fact_orders fo
+         
+  )
+      
+  GROUP BY 1, 2, 3, 4, 5, 6
+)
+;
+
+
+  -- INSERT INTO
+  
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.il_promotions` 
+  
+SELECT
+     c.date
+    ,c.moment
+    ,c.user_segment
+    ,c.country_code
+    ,c.city_name
+    
+    ,c.partner_id
+    ,c.partner_name
+    ,c.is_aaa
+    ,c.is_dmart
+
+    ,c.campaign_id
+    ,c.start_date
+    ,c.end_date
+    ,c.platform_purpose as campaign_purpose
+    ,c.campaign_type
+    ,CASE WHEN REGEXP_CONTAINS(c.campaign_subtype, "Free") THEN "Free Item" ELSE INITCAP(c.product_discount_type) END as discount_type
+    ,c.min_trigger_qty_product_discount as minimum_trigger_quantity
+    ,c.discount_usage_limit as usage_limit
+    ,CASE WHEN c.target_audience = "SUBSCRIBED_USER" THEN "Plus Only" 
+          WHEN c.target_audience = "ALL" THEN "All" 
+          ELSE NULL END AS target_audience
+
+    ,SAFE_CAST(ROUND(SAFE_DIVIDE(c.original_price_lc, er.rate_eu), 2) AS FLOAT64) as original_price
+    ,SAFE_CAST(ROUND(SAFE_DIVIDE(c.discounted_amount_lc, er.rate_eu), 2) AS FLOAT64) as discount
+    ,SAFE_CAST(ROUND(SAFE_DIVIDE(c.discounted_price_lc, er.rate_eu), 2) AS FLOAT64) as final_price
+    ,CASE WHEN c.campaign_type = "Strikethrough" THEN SAFE_CAST(ROUND(SAFE_DIVIDE(c.discounted_amount_lc, original_price_lc)*100, 1) AS FLOAT64)
+          WHEN c.campaign_type = "SameItemBundle" OR c.campaign_type = "MixAndMatch" AND NOT REGEXP_CONTAINS(c.campaign_subtype, "Free") THEN SAFE_CAST(ROUND(SAFE_DIVIDE(c.discounted_amount_lc, original_price_lc*c.min_trigger_qty_product_discount)*100, 1) AS FLOAT64)
+          WHEN c.campaign_type = "SameItemBundle" OR c.campaign_type = "MixAndMatch" AND REGEXP_CONTAINS(c.campaign_subtype, "Free") THEN SAFE_CAST(ROUND(SAFE_DIVIDE(c.discounted_amount_lc, original_price_lc*c.min_trigger_qty_product_discount)*100, 1) AS FLOAT64)
+          ELSE NULL END AS implicit_unit_discount_percentage
+          
+    ,c.product_name
+    ,c.product_id
+    ,c.sku
+    ,c.master_code
+    ,c.barcodes
+    ,c.level_one 
+    ,c.level_two
+    ,c.level_three
+
+    , ROUND(COALESCE(co.number_users, 0), 0) as number_users
+    , co.distinct_user_id as distinct_users
+
+    , ROUND(COALESCE(co.number_orders, 0), 0) as number_orders
+    , co.distinct_order_id as distinct_orders
+
+    , ROUND(COALESCE(co.volume_orders, 0), 0) as volume_orders
+    , ROUND(COALESCE(SAFE_DIVIDE(co.value_orders, er.rate_eu), 0), 0) as value_orders
+
+    , ROUND(COALESCE(co.product_volume, 0), 0) as product_volume
+    , ROUND(COALESCE(co.product_discounted_volume, 0), 0) as product_discounted_volume
+    , ROUND(COALESCE(SAFE_DIVIDE(co.product_value, er.rate_eu), 0), 0) as product_value
+    , ROUND(COALESCE(SAFE_DIVIDE(co.product_dicount_value, er.rate_eu), 0), 0) as product_discount_value
+    , ROUND(COALESCE(SAFE_DIVIDE(co.product_net_value, er.rate_eu), 0), 0) as product_net_value
+
+    , ROUND(COALESCE(po.partner_number_orders, 0), 0) as partner_number_orders
+    , ROUND(COALESCE(po.partner_volume_orders, 0), 0) as partner_volume_orders
+    , ROUND(COALESCE(SAFE_DIVIDE(po.partner_value_orders, er.rate_eu), 0), 0) as partner_value_orders
+
+    , ROUND(COALESCE(o_l3.number_orders_l3, 0), 0) as city_number_orders_l3
+    , ROUND(COALESCE(o_l3.volume_orders_l3, 0), 0) as city_volume_orders_l3
+    , ROUND(COALESCE(SAFE_DIVIDE(o_l3.value_orders_l3, er.rate_eu), 0), 0) as city_value_orders_l3
+
+    , ROUND(COALESCE(po_l3.partner_number_orders_l3, 0), 0) as partner_number_orders_l3
+    , ROUND(COALESCE(po_l3.partner_volume_orders_l3, 0), 0) as partner_volume_orders_l3
+    , ROUND(COALESCE(SAFE_DIVIDE(po_l3.partner_value_orders_l3, er.rate_eu), 0), 0) as partner_value_orders_l3
+
+    , ROUND(COALESCE(o_l2.number_orders_l2, 0), 0) as city_number_orders_l2
+    , ROUND(COALESCE(o_l2.volume_orders_l2, 0), 0) as city_volume_orders_l2
+    , ROUND(COALESCE(SAFE_DIVIDE(o_l2.value_orders_l2, er.rate_eu), 0), 0) as city_value_orders_l2
+
+    , ROUND(COALESCE(po_l2.partner_number_orders_l2, 0), 0) as partner_number_orders_l2
+    , ROUND(COALESCE(po_l2.partner_volume_orders_l2, 0), 0) as partner_volume_orders_l2
+    , ROUND(COALESCE(SAFE_DIVIDE(po_l2.partner_value_orders_l2, er.rate_eu), 0), 0) as partner_value_orders_l2
+
+    , ROUND(COALESCE(o_l1.number_orders_l1, 0), 0) as city_number_orders_l1
+    , ROUND(COALESCE(o_l1.volume_orders_l1, 0), 0) as city_volume_orders_l1
+    , ROUND(COALESCE(SAFE_DIVIDE(o_l1.value_orders_l1, er.rate_eu), 0), 0) as city_value_orders_l1
+
+    , ROUND(COALESCE(po_l1.partner_number_orders_l1, 0), 0) as partner_number_orders_l1
+    , ROUND(COALESCE(po_l1.partner_volume_orders_l1, 0), 0) as partner_volume_orders_l1
+    , ROUND(COALESCE(SAFE_DIVIDE(po_l1.partner_value_orders_l1, er.rate_eu), 0), 0) as partner_value_orders_l1
+
+FROM campaigns_disaggregated c
+LEFT JOIN campaign_orders co 
+  ON c.campaign_id = co.campaign_id AND c.partner_id = co.partner_id AND c.product_id = co.product_id AND c.incentive_type = co.incentive_type AND c.campaign_type = co.campaign_type AND c.date = co.date AND c.moment = co.moment AND c.user_segment = co.user_segment
+
+LEFT JOIN exchange_rate er
+  ON c.country_code = er.country_code AND date_trunc(c.date, month) = er.currency_exchange_date
+
+LEFT JOIN partner_orders po 
+  ON c.partner_id = po.partner_id AND c.date = po.date AND c.moment = po.moment AND c.user_segment = po.user_segment
+
+LEFT JOIN master_category_three_orders o_l3 
+  ON c.date = o_l3.date AND c.moment = o_l3.moment AND c.user_segment = o_l3.user_segment
+    AND c.country_code = o_l3.country_code AND c.city_name = o_l3.city_name AND c.level_one = o_l3.level_one AND c.level_two = o_l3.level_two AND c.level_three = o_l3.level_three
+
+LEFT JOIN partner_master_category_three_orders po_l3 
+  ON c.partner_id = po_l3.partner_id AND c.date = po_l3.date AND c.moment = po_l3.moment AND c.user_segment = po_l3.user_segment
+    AND c.level_one = po_l3.level_one AND c.level_two = po_l3.level_two AND c.level_three = po_l3.level_three
+
+LEFT JOIN master_category_two_orders o_l2
+  ON c.date = o_l2.date AND c.moment = o_l2.moment AND c.user_segment = o_l2.user_segment
+    AND c.country_code = o_l2.country_code AND c.city_name = o_l2.city_name AND c.level_one = o_l2.level_one AND c.level_two = o_l2.level_two
+
+LEFT JOIN partner_master_category_two_orders po_l2
+  ON c.partner_id = po_l2.partner_id AND c.date = po_l2.date AND c.moment = po_l2.moment AND c.user_segment = po_l2.user_segment
+    AND c.level_one = po_l2.level_one AND c.level_two = po_l2.level_two 
+
+LEFT JOIN master_category_one_orders o_l1
+  ON c.date = o_l1.date AND c.moment = o_l1.moment AND c.user_segment = o_l1.user_segment
+    AND c.country_code = o_l1.country_code AND c.city_name = o_l1.city_name AND c.level_one = o_l1.level_one 
+
+LEFT JOIN partner_master_category_one_orders po_l1
+  ON c.partner_id = po_l1.partner_id AND c.date = po_l1.date AND c.moment = po_l1.moment AND c.user_segment = po_l1.user_segment
+    AND c.level_one = po_l1.level_one
+    ;
+
+DROP TABLE IF EXISTS fact_orders;
+DROP TABLE IF EXISTS campaigns;
+DROP TABLE IF EXISTS campaigns_disaggregated;
+DROP TABLE IF EXISTS vendor_order_campaigns;
+DROP TABLE IF EXISTS campaign_orders;
+DROP TABLE IF EXISTS exchange_rate;
+DROP TABLE IF EXISTS partner_orders;
+DROP TABLE IF EXISTS partner_master_category_three_orders;
+DROP TABLE IF EXISTS partner_master_category_two_orders;
+DROP TABLE IF EXISTS partner_master_category_one_orders;
+DROP TABLE IF EXISTS master_category_three_orders;
+DROP TABLE IF EXISTS master_category_two_orders;
+DROP TABLE IF EXISTS master_category_one_orders;
+
+
+end for
+
+-- ORDER BY c.country_code, c.partner_id, c.product_id, c.date, c.moment, c.user_segment

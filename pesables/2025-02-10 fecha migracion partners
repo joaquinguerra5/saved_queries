@@ -1,0 +1,32 @@
+WITH mig_date AS 
+(
+SELECT
+  partner_id,
+  partner_name,
+  MIN(CASE WHEN COALESCE(sku_migrados,0) > 0 THEN snapshot_date ELSE NULL END) as migration_date
+FROM
+  (SELECT
+    snapshot_date,
+    partner_id,
+    partner_name,
+    COUNT(DISTINCT CASE WHEN (sold_by_piece OR sold_by_weight) THEN sku ELSE NULL END) as sku_migrados
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+  ON
+    aaa.partner_id = dvps.remote_vendor_id
+  WHERE
+    snapshot_date BETWEEN '2024-06-01' AND CURRENT_DATE()
+  GROUP BY
+    ALL
+  )
+  GROUP BY
+    ALL 
+
+)
+
+SELECT
+  *
+FROM
+  mig_date

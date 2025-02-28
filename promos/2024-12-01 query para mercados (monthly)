@@ -1,0 +1,174 @@
+--- NO MODIFICAR
+
+DECLARE fecha_desde DATE DEFAULT '2024-11-01';
+DECLARE fecha_hasta DATE DEFAULT '2024-11-05';
+DECLARE pais STRING DEFAULT '';
+DECLARE franchise_name STRING DEFAULT '';
+DECLARE cant_productos INT64 DEFAULT 50;
+DECLARE tipo_promo INT64 DEFAULT 1;
+
+--- FIN NO MODIFICAR
+
+
+
+--- CONFIGURACIÓN DE PARAMETROS (Descomentar en caso de querer filtrar para fechas distintas o cambiar alguno de los paràmetros establecidos)
+
+--SET fecha_desde = '2024-11-01';   /* FECHA DE INICIO DEL PERÍODO DE ANÁLISIS */
+--SET fecha_hasta = '2024-11-02';   /* FECHA DE FIN DEL PERÍODO DE ANÁLISIS */
+SET pais = 'ar';                    /* COUNTRY CODE DEL PAÍS A ANALIZAR */
+--SET franchise_name = 'Carrefour'; /* NOMBRE DE LA AAA A ANALIZAR */
+--SET cant_productos = 50;          /* CANTIDAD DE PRODUCTOS QUE DESEA RANKEAR */
+--SET tipo_promo = 1                  /* TIPO DE PROMOS QUE DESEA INCLUIR (1 = Todas, 2 = Solo SameItemBundle, 3 = Solo Strikethrough)*/
+
+--- FIN CONFIGURACIÓN DE PARAMETROS
+
+
+--- OUTPUT
+
+-- master_code                    : código del master_product
+-- product_name                   : nombre del producto
+-- level_one                      : nivel 1 de categorizaciòn en PIM
+-- level_two                      : nivel 2 de categorizaciòn en PIM
+-- distinct_day_partner           : # de dias/partners en los que el producto estuvo en promo (EJ: El producto estuvo en promo 3 dìas en 2 partners distintos --> 6)
+-- sum_product_clicks             : # de clicks (add_to_cart o product_click) que generó el producto mientras estuvo en promoción
+-- sum_product_confirmed_orders   : # de ordenes (add_to_cart o product_click) en las que participó el producto mientras estuvo en promoción
+-- coef_interes                   : sum_product_clicks / distinct_day_partner
+-- ranking_promo                  : ranking de los productos en promo ordenado por coef_interes y sum_product_confirmed_orders
+
+--- FIN OUTPUT
+
+
+
+
+WITH base_promos_pop AS
+(
+SELECT
+  promo.*,
+  dvp.product_is_active,
+  pop.confirmed_orders,
+  pop.order_ids,
+  pop.any_click,
+  pop.users_any_click,
+FROM
+  `peya-food-and-groceries.ml_qcommerce.il_promotions` promo
+LEFT JOIN
+  `peya-food-and-groceries.ml_qcommerce.il_popularity`  pop
+ON
+  promo.partner_id = pop.partner_id AND promo.product_id = pop.product_id AND promo.date = pop.date AND promo.moment = pop.moment AND promo.user_segment = pop.user_segment
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvp
+ON
+  dvp.remote_vendor_id = promo.partner_id AND dvp.master_code = promo.master_code AND snapshot_date = promo.date
+INNER JOIN
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+  aaa.partner_id = promo.partner_id
+WHERE
+  promo.date BETWEEN fecha_desde AND fecha_hasta
+AND
+  LOWER(promo.country_code) = pais
+AND
+  CASE WHEN franchise_name = '' THEN 1=1 ELSE franchise = franchise_name END
+),
+
+no_ambiguos AS (
+  SELECT
+  date,
+  partner_id,
+  partner_name,
+  country_code,
+  master_code,
+  product_name,
+  level_one,
+  level_two,
+  user_segment,
+  moment,
+  AVG(implicit_unit_discount_percentage) as implicit_discount,
+  COALESCE(COUNTIF(campaign_type = 'Strikethrough'),0) as st,
+  COALESCE(COUNTIF(campaign_type = 'SameItemBundle'),0) as si,
+  COUNT(DISTINCT campaign_id) as cant_campaigns,
+  ANY_VALUE(confirmed_orders) as confirmed_orders,
+  ANY_VALUE(any_click) as clicks
+FROM
+  base_promos_pop
+WHERE
+  ((product_is_active) OR (confirmed_orders > 0))
+--AND
+  --confirmed_orders >0
+GROUP BY
+  ALL
+HAVING
+  ((COALESCE(COUNTIF(campaign_type = 'Strikethrough'),0) = 0) OR (COALESCE(COUNTIF(campaign_type = 'SameItemBundle'),0))=0)
+),
+
+summary_product_day AS
+(
+SELECT
+  date,
+  partner_id,
+  country_code,
+  partner_name,
+  master_code,
+  product_name,
+  level_one,
+  level_two,
+--  implicit_discount,
+  SUM(clicks) as product_clicks,
+  SUM(confirmed_orders) as product_confirmed_orders
+FROM
+  no_ambiguos as na
+WHERE
+  CASE 
+    WHEN tipo_promo = 1 THEN 1=1 
+    WHEN tipo_promo = 2 THEN (st=0 AND si>0)
+    ELSE (st>0 AND si=0)
+  END
+GROUP BY
+  ALL
+
+
+),
+
+
+avg_metrics AS
+(
+SELECT
+  --* EXCEPT(date,partner_id,partner_name,product_clicks),
+  master_code,
+  product_name,
+  level_one,
+  level_two,
+  COUNT(DISTINCT CONCAT(date,partner_id)) as distinct_day_partner,
+  SUM(product_clicks) as sum_product_clicks,
+  SUM(product_confirmed_orders) as sum_product_confirmed_orders,
+  /*AVG(product_clicks) as avg_clicks,
+  AVG(partner_clicks) as avg_partner_clicks,
+  AVG(click_rate) as avg_click_rate,*/
+  ROUND(SAFE_DIVIDE(SUM(product_clicks),COUNT(DISTINCT CONCAT(date,partner_id))),2) as coef_interes
+FROM
+  summary_product_day
+--WHERE
+  --master_code = 'latamVKVS7Z'
+GROUP BY
+  ALL
+
+),
+
+ranking AS
+(SELECT
+  *,
+  ROW_NUMBER() OVER(ORDER BY coef_interes DESC,sum_product_confirmed_orders DESC) as ranking_promo
+FROM
+  avg_metrics
+)
+
+
+SELECT
+  *
+FROM
+  ranking
+WHERE
+  ranking_promo <= cant_productos
+
+
+  

@@ -1,0 +1,43 @@
+DECLARE date_from DATE DEFAULT '2024-04-14';
+DECLARE date_to DATE DEFAULT '2024-12-14';
+
+SELECT
+  --product_name,
+  --master_category_names.level_one,
+  --master_category_names.level_two,
+  COUNT(DISTINCT CASE WHEN DATE(os.registered_date) < mig.migration_date THEN os.id ELSE NULL END) as orders_pre_mig,
+  COUNT(DISTINCT CASE WHEN DATE(os.registered_date) < mig.migration_date THEN user.id ELSE NULL END) as users_pre_mig,
+  COUNT(DISTINCT CASE WHEN DATE(os.registered_date) >= mig.migration_date THEN os.id ELSE NULL END) as orders_post_mig,
+  COUNT(DISTINCT CASE WHEN DATE(os.registered_date) >= mig.migration_date THEN user.id ELSE NULL END) as users_post_mig,
+FROM
+  `peya-data-origins-pro.cl_core.orders_service` os, UNNEST(details) d
+INNER JOIN
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+  aaa.partner_id = os.vendor.id
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+ON
+  os.vendor.id = dvps.remote_vendor_id AND d.product.id = dvps.remote_product_id AND DATE(os.registered_date) = dvps.snapshot_date
+LEFT JOIN
+  `peya-food-and-groceries.user_joaquin_guerra.temp_aaa_migration_date` mig
+ON
+  mig.partner_id = aaa.partner_id
+WHERE
+  dvps.snapshot_date BETWEEN date_From AND date_to
+AND
+  DATE(os.registered_date) BETWEEN date_from AND date_to
+AND
+  os.vendor.id = 329470
+AND
+  (  (master_category_names.level_one = 'Produce'
+AND
+  (master_category_names.level_two IN ('Fruit','Vegetables')))
+OR
+  ((master_category_names.level_one = 'Meat / Seafood' )OR (master_category_names.level_one = 'Frozen' AND master_category_names.level_three = 'Meat')))
+AND
+  (`peya-food-and-groceries.automated_tables_reports.fnIsEAN`(ltrim(barcodes,"0")) = 0 OR substr(ltrim(barcodes,"0"),1,1) = '2')
+AND
+  state = 'CONFIRMED'
+GROUP BY
+  ALL

@@ -1,0 +1,65 @@
+WITH
+  prods AS (
+  SELECT
+    platform_vendor_id,
+    platform_product_id,
+    c.master_category_names.level_one,
+    ROW_NUMBER() OVER(PARTITION BY platform_vendor_id,platform_product_id ORDER BY vp.vendor_product_created_at_utc DESC) as rank_prod
+  FROM
+    `peya-data-origins-pro.cl_dmarts.qc_catalog_products` prods,
+    UNNEST(vendor_products) vp,
+    UNNEST(master_categories) c
+  WHERE
+    vendor_product_is_deleted = FALSE
+    AND status = 'ACTIVE'
+    AND vendor_is_deleted = FALSE ),
+
+
+  orders AS (
+  SELECT
+    fo.registered_date,
+    qc.cc,
+    fo.order_id,
+    level_one,
+    d.quantity AS quantity,
+    fo.qty_total_products AS qty_total,
+    COUNT(DISTINCT fo.order_id) OVER(PARTITION BY DATE_TRUNC(fo.registered_date,MONTH),qc.cc) AS total_orders
+  FROM
+    `peya-bi-tools-pro.il_core.fact_orders` fo,
+    UNNEST(details) d
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.qc_AAA_order` qc
+  ON
+    qc.order_id = fo.order_id
+  LEFT JOIN (
+    SELECT
+      *
+    FROM
+      prods
+    WHERE rank_prod = 1
+     ) p
+  ON
+    p.platform_vendor_id = CAST(fo.restaurant.id AS STRING)
+    AND p.platform_product_id = CAST(d.product.product_id AS STRING)
+  WHERE
+    fo.registered_date BETWEEN '2024-10-01'
+    AND '2025-01-31'
+    --AND LOWER(qc.cc) ='ar'
+    AND fo.order_status = 'CONFIRMED'
+    --AND fo.order_id = 1392913783 
+    AND
+      COALESCE(qc.dps_small_order_fee_eur,0) = 0
+    )--,
+
+
+SELECT
+  DATE_TRUNC(registered_date,MONTH) as month,
+  cc,
+  COALESCE(level_one,'NA') as level_one,
+  ROUND(SAFE_DIVIDE(COUNT(DISTINCT order_id),MAX(total_orders)),2)  as order_penet,
+  ROUND(SAFE_DIVIDE(SUM(quantity),COUNT(DISTINCT order_id)),2) as items_por_orden,
+  ROUND(SAFE_DIVIDE(SUM(quantity),MAX(total_orders)),2) bsize
+FROM
+  orders
+GROUP BY  
+  ALL

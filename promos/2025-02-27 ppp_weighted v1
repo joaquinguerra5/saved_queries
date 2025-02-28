@@ -1,5 +1,13 @@
 DECLARE day DATE DEFAULT DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY);
 
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.aaa_weighted_ppp_daily`
+
+PARTITION BY snapshot_date
+
+CLUSTER BY cc, franchise, partner_id
+
+AS
+
 
 
 WITH

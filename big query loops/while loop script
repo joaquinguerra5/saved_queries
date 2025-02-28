@@ -1,0 +1,63 @@
+DECLARE i INT64 DEFAULT 2;
+DECLARE max_iterations INT64 DEFAULT 30; -- Cambia esto según tu necesidad
+DECLARE date_from DATE;
+DECLARE date_to DATE;
+
+-- Iteramos desde 1 hasta max_iterations
+WHILE i <= max_iterations DO
+  SET date_from = DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL i+1 WEEK),WEEK(MONDAY));
+  SET date_to =  LAST_DAY(DATE_SUB(CURRENT_DATE(),INTERVAL i WEEK),WEEK(MONDAY));-- El valor del parámetro que cambia en cada iteración
+
+  -- Ejecuta la consulta usando el valor de los parametros date_from y date_to
+  EXECUTE IMMEDIATE '''
+    INSERT INTO `peya-food-and-groceries.automated_tables_reports.AAA_new_products_weekly`
+
+    WITH new_products AS
+(SELECT
+  DISTINCT 
+  @date_to as week,
+  aaa.partner_id,
+  aaa.partner_name,
+  aaa.cc,
+  aaa.franchise,
+  aaa.clasificacion,
+  vw.platform_product_id product_id,
+  LTRIM(barcodes,"0") as barcode,
+  master_code,
+  product_name,
+  master_category_names.level_one,
+  master_category_names.level_two,
+  DATE(vw.created_at) created_at,
+  DATE(master_created_at) master_created_at,
+  `peya-food-and-groceries.automated_tables_reports.getProductActivity`(aaa.partner_id, CAST(vw.platform_product_id AS INT64), @date_from, LAST_DAY(@date_from,WEEK(MONDAY))) as last_week_activity,
+  `peya-food-and-groceries.automated_tables_reports.getProductActivity`(aaa.partner_id, CAST(vw.platform_product_id AS INT64), DATE_TRUNC(@date_to,WEEK(MONDAY)), @date_to) weekly_activity
+  --av_actual.product_activity_rate as actual_month_activity
+FROM
+  `peya-data-origins-pro.cl_dmarts.catalog_products` AS menu,
+  UNNEST(warehouse_info) AS w,
+  UNNEST(vendor_info) AS vw
+INNER JOIN
+  `peya-data-origins-pro.cl_qcommerce.partners_aaa` as aaa
+ON
+  CAST(aaa.partner_id AS STRING) = vw.platform_vendor_id
+WHERE
+  DATE(vw.created_at) between @date_from AND @date_to
+/*AND
+  partner_id = 127900*/
+)
+
+
+SELECT
+  *,
+  DATE_DIFF(created_at, master_created_at, DAY) as diff_vendor_master_created
+FROM
+  new_products
+WHERE
+  ((last_week_activity = 0) OR (last_week_activity IS NULL))
+AND
+  weekly_activity > 0
+  '''
+  USING date_from AS date_from, date_to AS date_to;
+
+  SET i = i + 1;
+END WHILE;

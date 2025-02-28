@@ -1,0 +1,97 @@
+DECLARE day DATE DEFAULT DATE_TRUNC(DATE_SUB(DATE_TRUNC(CURRENT_DATE()-1,MONTH),INTERVAL 13 MONTH),MONTH);
+
+
+WITH 
+partners AS (
+  SELECT
+      snapshot_date,
+      partner_id,
+      partner_name,
+      clasificacion,
+      cc,
+      franchise
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot`
+  WHERE
+    snapshot_date >= day
+),
+
+
+qc_aaa_orders AS
+(SELECT
+  month_date,
+  isoweek_Year,
+  qc.registered_date,
+  partner_id,
+  COUNT(DISTINCT order_id) as orders,
+  COUNT(DISTINCT CASE WHEN confirmed_orders = 1 THEN order_id ELSE NULL END) as confirmed_orders,
+  SUM(CASE WHEN confirmed_orders = 1 THEN gmv_gross ELSE NULL END) as confirmed_gmv,
+  SUM(gpo) as gpo_total,
+  SUM(CASE WHEN confirmed_orders = 1 THEN gpo ELSE NULL END) as confirmed_gpo,
+
+FROM
+  `peya-food-and-groceries.automated_tables_reports.qc_AAA_order` qc
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_historical_partners` dhp
+ON
+  dhp.yyyymmdd = qc.registered_date AND dhp.restaurant_id = qc.partner_id
+WHERE
+  qc.registered_date >= day
+GROUP BY
+  ALL),
+
+
+ops as 
+-- AVAILABILITY. PARA AGRUPAR AVG(WSH)*(SUM(weighted_open_hours)/SUM(scheduled_hours))
+(SELECT
+  date,
+  restaurant_id,
+  shopper_gmv_eur,
+  total_gmv_eur,
+  ind_num,
+  ind_den,
+  wot,
+  wsh,
+  vfr_orders,
+  total_orders,
+  replaced_SKUs,
+  oos_SKUs,
+  requested_SKUs,
+  replaced_products,
+  oos_products,
+  is_order_late,
+  completed_orders
+FROM
+  `peya-chile.automated_tables_reports.aaa_ops_overview`
+WHERE
+  date >= day
+  )
+
+SELECT
+  DATE_TRUNC(p.snapshot_date,MONTH) as month_date,
+  CONCAT(EXTRACT(YEAR FROM p.snapshot_date),"-",EXTRACT(ISOWEEK FROM p.snapshot_date)) as isoweek_Year,
+  p.snapshot_date as registered_date,
+  p.partner_id,
+  p.cc,
+  p.franchise,
+  p.partner_name,
+  p.clasificacion,
+  o.* EXCEPT(partner_id,month_date,isoweek_year,registered_date),
+  --f.* EXCEPT(month_date,partner_id),
+  ops.* EXCEPT (date,restaurant_id),
+  o.registered_date as date_orders_info,
+  ops.date as date_ops_info,
+  CASE
+    WHEN DATE_TRUNC(p.snapshot_date,MONTH) = DATE_TRUNC(DATE_SUB(DATE_TRUNC(CURRENT_DATE()-1,MONTH),INTERVAL 1 MONTH),MONTH) THEN 1 ELSE 0 
+  END as last_full_month 
+FROM
+  partners p
+LEFT JOIN
+  qc_AAA_orders o
+ON
+  o.partner_id = p.partner_id AND p.snapshot_date = o.registered_date
+LEFT JOIN
+  ops 
+ON
+  ops.restaurant_id = p.partner_id AND ops.date = p.snapshot_date
+ 

@@ -1,0 +1,119 @@
+--DECLARE day DATE DEFAULT DATE_TRUNC(DATE_SUB(DATE_TRUNC(CURRENT_DATE()-1,MONTH),INTERVAL 13 MONTH),MONTH);
+DECLARE day DATE DEFAULT DATE_TRUNC(DATE_SUB(DATE_TRUNC(CURRENT_DATE()-1,MONTH),INTERVAL 13 MONTH),MONTH);
+
+
+WITH 
+partners AS (
+  SELECT
+      DISTINCT
+      DATE_TRUNC(snapshot_date,MONTH) as month_date,
+      partner_id,
+      partner_name,
+      clasificacion,
+      cc,
+      franchise
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot`
+  WHERE
+    snapshot_date >= day
+),
+
+
+qc_aaa_orders AS
+(SELECT
+  month_date,
+  partner_id,
+  COUNT(DISTINCT CASE WHEN confirmed_orders = 1 THEN order_id ELSE NULL END) as confirmed_orders,
+FROM
+  `peya-food-and-groceries.automated_tables_reports.qc_AAA_order` qc
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_historical_partners` dhp
+ON
+  dhp.yyyymmdd = qc.registered_date AND dhp.restaurant_id = qc.partner_id
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_shopper_type` s
+ON
+  s.shopper_type_id = dhp.shopper_type_id
+WHERE
+  qc.registered_date >= day
+GROUP BY
+  ALL),
+
+coverage_country AS
+(SELECT
+  month_date,
+  country,
+  country_name,
+  SUM(customers_cubiertos) as customers_cubiertos_aaa,
+  SUM(customers_cubiertos_plat) as customers_cubiertos_plat
+FROM
+  `peya-food-and-groceries.automated_tables_reports.qc_AAA_coverage_city_MAUs`
+WHERE
+  month_date >= day
+GROUP BY
+  ALL),
+
+coverage_franchise AS (
+  SELECT
+    month_date,
+    franchise,
+    SUM(customers_cubiertos) as customers_cubiertos_franchise,
+FROM
+  `peya-food-and-groceries.automated_tables_reports.qc_AAA_coverage_franchise_MAUs`
+WHERE
+  month_date >= day
+GROUP BY 
+  ALL
+),
+
+fundamentals AS (
+SELECT
+  a.month_date as month_date,
+  a.partner_id,
+  --a.clasificacion,
+  avg_active_products,
+  partner_listed_products,
+  distinct_products_promo_month_active_1_day,
+  update_assortment_fundamentals_date
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_partner_reporting_monthly` a
+WHERE
+  a.month_date >= day)
+
+SELECT
+  p.*,
+  o.confirmed_orders,
+  CASE
+    WHEN clasificacion = 'Supermarket' THEN confirmed_orders ELSE NULL
+  END as confirmed_orders_smk,
+  c.customers_cubiertos_aaa,
+  c.customers_cubiertos_plat,
+  cf.customers_cubiertos_franchise,
+  f.* EXCEPT(month_date,partner_id),
+  CASE
+    WHEN customers_cubiertos_plat IS NOT NULL THEN LAST_DAY(p.month_date)
+    ELSE NULL
+  END as update_coverage /*Traemos el ultimo dia del mes para cada registro de cobertura ya que no se calcula el MTD*/
+FROM
+  partners p
+LEFT JOIN
+  coverage_country c
+ON
+  c.month_date = p.month_date AND c.country = p.cc
+LEFT JOIN
+  coverage_franchise cf
+ON
+  cf.franchise = p.franchise AND cf.month_date = p.month_date
+LEFT JOIN
+  qc_AAA_orders o
+ON
+  o.partner_id = p.partner_id AND p.month_date = o.month_date
+LEFT JOIN
+  fundamentals f
+ON
+  f.partner_id = p.partner_id AND f.month_date = p.month_date
+/*LEFT JOIN
+  fundamentals f
+ON
+  f.month_date = o.month_date AND f.partner_id = o.partner_id*/
+ 

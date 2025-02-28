@@ -1,0 +1,50 @@
+## get vendor products 
+
+with productos_activos as
+(SELECT 
+  DISTINCT
+  DATE(timestamp) as timestamp,
+  content.product_id,
+  content.active,
+  content.vendor.vendor_id
+--content.product_id,content.active,content.timestamp,content.unit_price
+FROM (
+       SELECT * Except(rank)
+         FROM (
+         SELECT *,
+         row_number() OVER(PARTITION BY content.product_id ORDER BY timestamp DESC) AS rank
+         FROM `fulfillment-dwh-production.curated_data_shared_data_stream.product_stream` 
+         WHERE
+         --content.global_catalog_id = 'ae8cc800-9625-4333-a555-8668ded80a6a'
+     
+         -- AND 
+         DATE(timestamp) BETWEEN '2024-09-01' AND '2024-09-30'
+         )
+        
+      WHERE
+        content.active
+     ))
+
+SELECT
+  dvp.remote_vendor_id,
+  dvp.remote_product_id,
+  dvp.sku,
+  dvp.master_code,
+  dvp.barcodes,
+  dvp.product_name,
+  dvp.product_is_active,
+  pa.active
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvp
+LEFT JOIN
+  productos_activos pa
+ON
+  pa.product_id = CAST(dvp.remote_product_id AS STRING) AND pa.vendor_id = CAST(dvp.remote_vendor_id AS STRING) AND dvp.snapshot_date = pa.timestamp
+WHERE
+  snapshot_date BETWEEN '2024-09-01' AND '2024-09-30'
+AND
+  remote_vendor_id = 478795
+AND
+  product_is_active = false 
+AND
+  pa.active

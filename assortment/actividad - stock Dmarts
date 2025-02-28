@@ -1,0 +1,31 @@
+WITH dmart_activity_stock AS
+(
+  SELECT
+  dvp.remote_vendor_id,
+  dvp.remote_product_id,
+  dvp.sku,
+  dvp.master_code,
+  dvp.barcodes,
+  dvp.product_name,
+  product_is_active,
+  COALESCE(stock_end_of_day,0) > COALESCE(sales_buffer,0) + COALESCE(stock_reserved_quantity_day,0) as stock
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvp
+LEFT JOIN
+  `peya-datamarts-pro.dm_dmarts.dmarts_inventory` im
+ON
+  im.warehouse_id = dvp.warehouse_id AND dvp.sku = im.sku_id AND dvp.snapshot_date = im.date_local
+WHERE
+  dvp.snapshot_date = '2024-10-28'
+AND
+  dvp.remote_vendor_id = 286799
+)
+
+SELECT
+  stock,
+  product_is_active,
+  COUNT(DISTINCT remote_product_id) cant_prods
+FROM
+  dmart_activity_stock
+GROUP BY
+  1,2
