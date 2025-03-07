@@ -67,7 +67,6 @@ WHERE (
 '00169000030Wkf8AAC',	-- Luvebras
 '001690000350YBcAAM',	-- Amarket
 '00169000032PYVlAAO',	-- Wong
-'0011r00002VoHxLAAV',	-- Ketal
 '0011r00002VoHxuAAF',	-- Tottus
 '0011r00002VoI1SAAV',	-- Super Xtra
 '0011r00002VoI77AAF',	-- Super 99
@@ -100,10 +99,11 @@ WHERE (
 '0016900002ndd0NAAQ', -- Biggie
 '0016900002fZxcpAAC', -- Vea
 '0016900002dYydiAAC',  -- Jumbo
-'001bO000006UJjJQAW'  -- Plazas
+'001bO000006UJjJQAW',  -- Plazas
+'001bO00000BWifaQAD'  -- 'La Puerta del Sol'
 )
 OR
-  orders.franchise IN ('Ampm','La Puerta Del Sol','Fresh Market')
+  orders.franchise IN ('Ampm','Fresh Market')
 )
 
 )
