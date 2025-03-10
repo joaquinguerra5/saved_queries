@@ -1,0 +1,243 @@
+  /*
+    Donde ver el titulo y la volanta?
+    - Si el seasonal esta activo, puede verse en la app
+    - Sino consultar en figma https://www.figma.com/design/iJWDfwiUrut6zR7NHxaeZ9/%5BOX%5D---Seasonals---Handoff---%5B2025%5D?node-id=1846-5232&t=lJVFFColY9N1Ff3A-1
+  */
+
+with
+  seasonal_setting as (
+    select
+
+      /*FECHAS SEASONAL ACTIVO*/
+      date('2025-02-10') as start_date
+      ,date('2025-02-17') as end_date
+      --current_date-2 as start_date
+      --,current_date as end_date
+      
+      /*VOLANTA Y TITULO SEASONAL*/
+      ,lower('san valentín') as volanta
+      ,lower('ten tu cita perfecta') as titulo
+
+  )
+
+,shop_details AS (
+  SELECT DISTINCT
+    CONCAT(sessionId,global_entity_id) as sessionId
+    , partition_date
+    , businessType
+    , user_segment
+    , partnerId
+    , partner_name
+    , franchise
+    , cc
+    FROM (
+      SELECT
+        e.sessionId
+        , p.businessCategory.businessType
+        , e.global_entity_id
+        , e.partition_date  
+        , case when user_segment = 'new' or user_segment is null then 'new&prospect' else user_segment end user_segment
+        , e.shopId as partnerId
+        , aaa.franchise
+        , aaa.partner_name
+        , aaa.cc
+      FROM 
+        `peya-data-origins-pro.cl_sessions.perseus_events` e
+      LEFT JOIN 
+        `peya-bi-tools-pro.il_core.dim_partner` p ON SAFE_CAST(e.shopId AS INT) = p.partner_id
+      LEFT JOIN `peya-bi-tools-pro.il_qcommerce.fact_user_segmentation` qc_s ON SAFE_CAST(e.userId AS INT) = qc_s.user_id
+      INNER JOIN
+        `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+      ON
+        SAFE_CAST(aaa.partner_id AS STRING) = e.shopId
+
+      WHERE 
+        partition_date between (select start_date from seasonal_setting) and (select end_date from seasonal_setting)
+        AND eventAction = 'shop_details.loaded'
+        AND screenName = 'ShopDetails'
+        AND screenType = 'shop_details'
+        AND ((platform = 'iOS' AND REGEXP_CONTAINS(appVersionCode, r'13.[1-9].+\d')) OR
+            (platform = 'iOS' AND REGEXP_CONTAINS(appVersionCode, r'14.[1-9].+\d')) OR
+            ((platform = 'Android' AND REGEXP_CONTAINS(appVersionCode, r'8.[1-9].[1-9].+\d')) OR
+            ((platform = 'Android' AND REGEXP_CONTAINS(appVersionCode, r'9.[1-9].[1-9].+\d')))))
+
+    )
+)
+
+,seasonal_shown as (
+  SELECT DISTINCT
+    CONCAT(sessionId,global_entity_id) as sessionId
+    ,partnerId
+    ,title
+  FROM (
+    SELECT
+      e.sessionId,
+      e.global_entity_id,
+      e.shopId AS partnerId,
+      lower(string(eventVariablesJson.swimlaneTitle)) as title
+    FROM 
+      `peya-data-origins-pro.cl_sessions.perseus_events` e
+    INNER JOIN
+        `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+      ON
+        SAFE_CAST(aaa.partner_id AS STRING) = e.shopId
+    WHERE 
+      partition_date BETWEEN (select start_date from seasonal_setting) AND (select end_date from seasonal_setting)
+      AND eventAction = 'swimlane.shown'
+      AND screenName = 'ShopDetails'
+      AND screenType = 'shop_details'
+      AND lower(string(eventVariablesJson.swimlaneStrategy)) in ('seasonal')
+      AND lower(string(eventVariablesJson.swimlaneTitle)) in (select titulo from seasonal_setting) --('titulo_seasonal')
+    )
+  )
+
+
+,seasonal_swiped as (
+  SELECT DISTINCT
+    CONCAT(sessionId,global_entity_id) as sessionId
+    ,partnerId
+  FROM (
+    SELECT
+      e.sessionId,
+      e.global_entity_id,
+      e.shopId AS partnerId,
+    FROM 
+      `peya-data-origins-pro.cl_sessions.perseus_events` e
+     INNER JOIN
+        `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+      ON
+        SAFE_CAST(aaa.partner_id AS STRING) = e.shopId
+    WHERE 
+      partition_date BETWEEN (select start_date from seasonal_setting) AND (select end_date from seasonal_setting)
+      AND eventAction = 'swimlane.swiped'
+      AND screenName = 'ShopDetails'
+      AND screenType = 'shop_details'
+      AND lower(string(eventVariablesJson.swimlaneStrategy)) in ('seasonal')
+      AND lower(string(eventVariablesJson.swimlaneTitle)) in (select titulo from seasonal_setting) --('titulo_seasonal')
+    )
+  )
+
+,seasonal_product_clicked as (
+  SELECT DISTINCT
+    CONCAT(sessionId,global_entity_id) as sessionId
+    ,partnerId
+  FROM (
+    SELECT
+      e.sessionId,
+      e.global_entity_id,
+      e.shopId AS partnerId,
+    FROM 
+      `peya-data-origins-pro.cl_sessions.perseus_events` e
+    INNER JOIN
+        `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+      ON
+        SAFE_CAST(aaa.partner_id AS STRING) = e.shopId
+    WHERE 
+      partition_date BETWEEN (select start_date from seasonal_setting) AND (select end_date from seasonal_setting)
+      AND eventAction = 'product.clicked'
+      AND screenName = 'ShopDetails'
+      AND screenType = 'shop_details'
+      AND lower(string(eventVariablesJson.productCategory)) in (select volanta from seasonal_setting) --('volanta_seasonal')
+    )
+  )
+
+,seasonal_add_cart as (
+  SELECT DISTINCT
+    CONCAT(sessionId,global_entity_id) as sessionId
+    ,partnerId
+  FROM (
+    SELECT
+      e.sessionId,
+      e.global_entity_id,
+      e.shopId AS partnerId,
+    FROM 
+      `peya-data-origins-pro.cl_sessions.perseus_events` e
+    INNER JOIN
+        `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+      ON
+        SAFE_CAST(aaa.partner_id AS STRING) = e.shopId
+    WHERE 
+      partition_date BETWEEN (select start_date from seasonal_setting) AND (select end_date from seasonal_setting)
+      AND eventAction = 'product.clicked'
+      AND screenName = 'ShopDetails'
+      AND screenType = 'shop_details'
+      AND lower(string(eventVariablesJson.productCategory)) in (select volanta from seasonal_setting) --('volanta_seasonal')
+      AND lower(string(eventVariablesJson.clickLocation)) in ('add_button')
+    )
+  )
+
+,seasonal_show_all as (
+  SELECT DISTINCT
+    CONCAT(sessionId,global_entity_id) as sessionId
+    ,partnerId
+  FROM (
+    SELECT
+      e.sessionId,
+      e.global_entity_id,
+      e.shopId AS partnerId,
+    FROM 
+      `peya-data-origins-pro.cl_sessions.perseus_events` e
+    INNER JOIN
+        `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+      ON
+        SAFE_CAST(aaa.partner_id AS STRING) = e.shopId
+    WHERE 
+      partition_date BETWEEN (select start_date from seasonal_setting) AND (select end_date from seasonal_setting)
+      AND eventAction = 'section_details.clicked'
+      AND screenName = 'ShopDetails'
+      AND screenType = 'shop_details'
+      AND lower(string(eventVariablesJson.swimlaneStrategy)) in ('seasonal')
+      AND lower(string(eventVariablesJson.swimlaneTitle)) in (select titulo from seasonal_setting) --('titulo_seasonal')
+    )
+  )
+
+,transactions AS (
+  SELECT DISTINCT
+    CONCAT(sessionId,global_entity_id) as sessionId,
+    transactionId,
+    shopId
+  FROM (
+    SELECT
+      e.sessionId,
+      e.global_entity_id,
+      e.transactionId,
+      e.shopId
+    FROM `peya-data-origins-pro.cl_sessions.perseus_events` e
+    INNER JOIN
+        `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+      ON
+        SAFE_CAST(aaa.partner_id AS STRING) = e.shopId
+    WHERE partition_date BETWEEN (select start_date from seasonal_setting) AND (select end_date from seasonal_setting)
+          AND eventAction = 'transaction'
+    )
+)
+
+SELECT
+  cc
+  ,franchise
+  ,sd.partnerId as partner_id
+  ,partner_name
+  ,count(distinct sd.sessionId) as shop_detail_sessions
+  ,count(distinct sshown.sessionId) as seasonal_shown
+  ,count(DISTINCT sswiped.sessionId) as seasonal_swiped
+  ,count(DISTINCT spc.sessionId) as seasonal_product_clicked
+  ,count(DISTINCT sac.sessionId) as seasonal_add_cart
+  ,count(DISTINCT ssa.sessionId) as seasonal_show_all
+
+  ,count(distinct case when sswiped.sessionId is not null or spc.sessionId is not null or sac.sessionId is not null or ssa.sessionId is not null then sshown.sessionId end) any_interaction
+  ,count(distinct case when spc.sessionId is not null or sac.sessionId is not null or ssa.sessionId is not null then sshown.sessionId end) any_interaction_acid
+
+  ,count(distinct case when sac.sessionId is not null OR spc.sessionId is not null OR ssa.sessionId IS NOT NULL then t.sessionId end) transactions
+
+FROM 
+  shop_details AS sd
+  LEFT JOIN seasonal_shown AS sshown        ON sshown.sessionId = sd.sessionId
+
+  LEFT JOIN seasonal_swiped AS sswiped      ON sswiped.sessionId = sshown.sessionId
+  LEFT JOIN seasonal_product_clicked AS spc ON spc.sessionId = sshown.sessionId
+  LEFT JOIN seasonal_add_cart AS sac        ON sac.sessionId = sshown.sessionId
+  LEFT JOIN seasonal_show_all AS ssa        ON ssa.sessionId = sshown.sessionId
+
+  LEFT JOIN transactions t on t.sessionId = sshown.sessionId
+
+GROUP BY ALL
