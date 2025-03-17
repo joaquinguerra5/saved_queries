@@ -1,0 +1,69 @@
+WITH sesiones AS (
+  SELECT
+    DATE_TRUNC(registered_date,MONTH) as month,
+    SUM(sessions_menu) as sessions_menu,
+    SUM(orders) as transactions
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.AAA_sessions_daily`
+  WHERE
+    registered_date BETWEEN '2023-01-01' AND '2025-02-28'
+  GROUP BY 
+    ALL 
+),
+
+gpv_promos AS
+(SELECT
+  DATE_TRUNC(registered_date, MONTH) as month,
+  SAFE_DIVIDE(SUM(gpv_promo_EU),SUM(gpv_total_EU)) as gpv_promo_contrib
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_promo_gpv_contribution`
+GROUP BY
+  ALL)
+
+SELECT
+  month_date,
+  SUM(gmv_gross) gmv,
+  SUM(confirmed_orders) AS orders,
+  MAX(gmv_monthly_latam) as gmv_total,
+  SAFE_DIVIDE(SUM(CASE WHEN confirmed_orders = 1 THEN gmv_gross END),MAX(gmv_monthly_latam)) as gmv_share,
+  COUNT(DISTINCT CASE
+    WHEN lower(mission_type) in ('fill in','stock_up') AND confirmed_orders=1 THEN order_id ELSE NULL END) as fill_in_stock_up_orders,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN lower(mission_type) in ('fill in','stock_up') AND confirmed_orders=1 THEN order_id ELSE NULL END),SUM(confirmed_orders)) as fill_stock_share,
+  SUM(basket_units) as basket_units,
+  SUM((CASE WHEN confirmed_orders = 1 THEN gfv_gross END)) as GFV_gross,
+  SAFE_DIVIDE(SUM(basket_units),SUM(confirmed_orders)) as basket_size,
+  SAFE_DIVIDE(SUM(CASE WHEN confirmed_orders = 1 THEN gfv_gross END),SUM(confirmed_orders)) as afv,
+  SUM(CASE WHEN confirmed_orders = 1 THEN delivery_fe_user END) as  delivery_fee,
+  SUM(CASE WHEN confirmed_orders = 1 THEN service_fee END) as service_fee,
+  -- SUM(COALESCE(delivery_fe_user,0)+COALESCE(service_fee,0)) as revenue_fee,
+  SAFE_DIVIDE(SUM(COALESCE(delivery_fe_user,0)+COALESCE(service_fee,0)),SUM(confirmed_orders)) as revenue_fee,
+  SUM(take_in) as take_in,
+  SAFE_DIVIDE(SUM(take_in),SUM(confirmed_orders)) as take_in_avg,
+  SUM(shoppers_cost) as shopper_cost,
+  SAFE_DIVIDE(SUM(shoppers_cost),SUM(confirmed_orders)) as shopper_cost_avg,
+  SUM(gpo) as gpo,
+  SAFE_DIVIDE(SUM(gpo),SUM(confirmed_orders)) as gpo_confirmed,
+  s.sessions_menu,
+  s.transactions,
+  SAFE_DIVIDE(s.transactions,s.sessions_menu) as CVR3,
+  gpv_promo_contrib,
+  SUM(1-confirmed_orders) as rejected_orders,
+  SAFE_DIVIDE(SUM(1-confirmed_orders),COUNT(DISTINCT order_id)) as fail_rate,
+  SAFE_DIVIDE(SUM(rejected_orders),COUNT(DISTINCT order_id)) as VFR,
+  SAFE_DIVIDE(SUM(qty_oos_fail_rate_orders),COUNT(DISTINCT order_id)) as oos_fail_rate,
+  SAFE_DIVIDE(SUM(original_picked_quantity),SUM(original_requested_quantity)) as found_rate,
+  SAFE_DIVIDE(SUM(Replaced_Products),SUM(NotFound_Products+Replaced_Products)) as replacement_rate,
+  SAFE_DIVIDE(SUM(items_oos_delivered),SUM(items_ordered)) as items_not_delivered,
+  SAFE_DIVIDE(SUM(inaccuracy_order),SUM(confirmed_orders)) as inaccuracy
+FROM
+  `peya-food-and-groceries.user_joaquin_guerra.temp_qc_aaa_order` o
+LEFT JOIN
+  sesiones s
+ON
+  s.month = o.month_date
+LEFT JOIN
+  gpv_promos gp
+ON
+  gp.month = o.month_date
+GROUP BY
+  ALL

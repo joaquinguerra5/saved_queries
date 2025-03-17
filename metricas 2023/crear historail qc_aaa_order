@@ -1,0 +1,701 @@
+-- DECLARE start_date DATE DEFAULT "2024-12-01";
+DECLARE start_date DATE DEFAULT DATE_TRUNC(DATE_SUB(CURRENT_DATE, INTERVAL 13 MONTH),MONTH);
+DECLARE end_date DATE DEFAULT current_date()-1;
+
+-- INSERT `peya-food-and-groceries.automated_tables_reports.qc_AAA_order`
+CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_qc_aaa_order`
+--PARTITION BY registered_date
+AS
+
+WITH  
+-- partners_AAA AS1211944845121194484
+-- (
+--   SELECT DISTINCT
+--     COALESCE(cp.franchise,t.franchise) as franchise,
+--     COALESCE(cp.partner_id,t.partner_id) as partner_id,
+--     COALESCE(cp.clasificacion,t.clasificacion) as clasificacion,
+   
+--     FROM  `peya-data-origins-pro.cl_qcommerce.partners_aaa` cp
+--     FULL JOIN `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` t
+--     ON t.partner_ID=cp.partner_id
+    
+-- ),
+partners_AAA as 
+(
+SELECT DISTINCT * 
+FROM `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` 
+WHERE snapshot_date>=start_date
+AND snapshot_date<=end_date
+ORDER BY 1 desc
+),
+
+VFD as
+(
+  SELECT 
+  order_id,
+  SUM(paid_by_partner) as paid_by_partner,
+  SUM(paid_by_company) as paid_by_company,
+  SUM(paid_by_3party) as paid_by_3party,
+  SUM(IF(discount_type="DELIVEY_FEE",paid_by_partner,0)) as df_paid_by_partner, -- sobre el Delivery fee listed 
+  SUM(IF(discount_type="QC_CAMPAIGN",paid_by_partner,0)) as basket_paid_by_partner, --sobre el GFV, no se incluye en el GMV y ni GFV
+  SUM(IF(discount_type="VOUCHER",paid_by_partner,0)) as voucher_paid_by_partner, -- no se incluye en GMV ni GFV
+  SUM(IF(discount_type NOT IN ("DELIVEY_FEE","QC_CAMPAIGN","VOUCHER"),paid_by_partner,0)) as other_paid_by_partner
+
+  FROM `peya-bi-tools-pro.il_core.order_incentives` 
+  WHERE registered_date>=start_date
+  AND registered_date<=end_date
+  GROUP BY ALL
+),
+
+contacts_help_center as
+(
+SELECT
+order_id,
+-- count(distinct case when category = 'chat' then contact_id else null end) as total_chats,
+-- count(distinct case when category = 'case' then contact_id else null end) as total_cases,
+count (distinct contact_id) as total_contacts_hc,
+sum(is_sat_ind) as sat_ac_cont,
+sum(is_satresp_ind) as resp_ac_cont,
+
+
+FROM `peya-delivery-and-support.automated_tables_reports.ops_contacts` 
+WHERE created_date_Mvd >= start_date
+AND created_date_mvd <= end_date
+and service = 'Customer'
+and CR1 in ('Live Order Process' , "Post-Delivery" , "Across Journey")
+group by all
+),
+
+sof as
+(
+SELECT DISTINCT platform_order_code,dps_small_order_fee_eur 
+FROM `fulfillment-dwh-production.curated_data_shared.dps_sessions_mapped_to_orders`
+WHERE 
+created_date >= start_date
+AND created_date  <= end_date
+),
+
+sessions_help_center as
+(
+  SELECT
+    ss.order_id,
+    count(distinct session_id) as total_sessions_hc,
+    FROM `peya-bi-tools-pro.il_hcc.fact_helpcenter_sessions_level` s,
+        UNNEST(session_navigation) ss
+    WHERE date(session_created_at) >= start_date
+    AND date(session_created_at)  <= end_date
+    Group by all
+    ORDER BY 2 desc
+),
+
+-- affordable_orders as (
+--   SELECT
+   
+--     order_id,
+--     sum(case when paid_by = 'RESTAURANT' then discount_amount else 0 end) as VFD_lc,
+--     sum(case when paid_by = 'COMPANY' then discount_amount else 0 end) as CFD_lc,
+--     sum(case when paid_by = 'THIRD' then discount_amount else 0 end) as TPFD_lc,
+   
+--     SUM(IF(aff.discount_type IN
+--     ('PARTNERSHIPS',
+--     'PCM_BEFOREPRICE',
+--     'PCM_DISCOUNTS_MULTI-BUY',
+--     'PCM_DISCOUNTS_PERCENTAGEDISCOUNT',
+--     'PCM_FREESHIPPINGFEE',
+--     'PROMOTOOL',
+--     'PROMOTOOL_BXGY Z%OFF',
+--     'PROMOTOOL_BXGY',
+--     'PROMOTOOL_COMPOSITE',
+--     'PROMOTOOL_PERCENTAGE',
+--     'PROMOTOOL_MIX & MATCH',
+--     'COMBO', 'ITEM_LEVEL', 'LOCAL_STORE_DEAL'),1,0)) as discount_orders
+
+
+--     FROM `peya-markets.automated_tables_reports.affordable_orders` aff  
+   
+--     WHERE
+--     registered_date>=start_date
+--     AND registered_date<=end_date
+
+
+--     GROUP BY 1
+-- ),
+
+items_not_delivered as
+(
+  SELECT
+order_id,
+SUM(
+        (CASE WHEN is_sent THEN in_cart_pelican_items ELSE 0 END - CASE WHEN is_sent THEN in_cart_pelican_items_sold ELSE 0 END)
+        + CASE WHEN is_sent THEN not_found_pelican_items ELSE 0 END
+        + (CASE WHEN is_sent THEN replaced_pelican_items ELSE 0 END 
+          - CASE WHEN is_sent THEN replaced_pelican_items_sold ELSE 0 END 
+          - CASE WHEN is_sent THEN replacements_pelican_items ELSE 0 END)
+        + (CASE WHEN is_failed_due_to_out_of_stock = TRUE THEN qty_ordered ELSE 0 END)) as items_oos_delivered,
+      
+SUM(
+        CASE WHEN is_sent THEN in_cart_pelican_items ELSE 0 END
+        + CASE WHEN is_sent THEN not_found_pelican_items ELSE 0 END
+        + CASE WHEN is_sent THEN not_processed_pelican_items ELSE 0 END
+        + CASE WHEN is_sent THEN replaced_pelican_items ELSE 0 END
+        + (CASE WHEN is_failed_due_to_out_of_stock = TRUE THEN qty_ordered ELSE 0 END) 
+    ) as items_ordered,
+
+FROM `fulfillment-dwh-production.curated_data_shared_dmart.ls_ops_orders` oo
+
+WHERE local_date >= start_date
+AND local_date  <= end_date
+
+group by 1
+),
+
+inaccuracy as 
+(
+  SELECT
+    DISTINCT original_order_date AS registered_date
+    , original_order_id as order_id
+    #, COUNT(DISTINCT CASE WHEN UPPER(cor.backoffice_or_contact_reason) IN ('MISSING ITEM', 'PRODUCT MISSING','MISSING_ITEMS') THEN original_order_id ELSE NULL END ) AS missing_item_orders
+    #, COUNT(DISTINCT CASE WHEN UPPER(cor.backoffice_or_contact_reason) IN ('WRONG ITEM', 'PRODUCT INCORRECT') THEN original_order_id ELSE NULL END ) AS wrong_item_orders
+    #, COUNT(DISTINCT CASE WHEN UPPER(cor.backoffice_or_contact_reason) IN ('WRONG ORDER') THEN original_order_id ELSE NULL END ) AS wrong_order_orders
+    #, COUNT(DISTINCT CASE WHEN UPPER(cor.backoffice_or_contact_reason) IN ('FOOD QUALITY') THEN original_order_id ELSE NULL END ) AS food_quality_orders
+    , COUNT(DISTINCT original_order_id) AS count_orders_inaccuracy
+  FROM `peya-bi-tools-pro.il_compensations.fact_compensations_and_refunds_care`, UNNEST(cor) AS cor
+  WHERE TRUE
+    AND UPPER(cor.care) = "REFUNDS"
+    AND UPPER(cor.backoffice_or_contact_reason) IN ( 'MISSING ITEM', 'PRODUCT MISSING', 'WRONG ITEM', 'PRODUCT INCORRECT', 'WRONG ORDER', 'FOOD QUALITY' ,'MISSING_ITEMS')
+    AND original_order_date>=start_date
+    AND original_order_date  <= end_date
+  GROUP BY 1, 2
+),
+
+fact_orders_profitability AS #17 GB
+(
+  SELECT  *
+  FROM `peya-fraud-and-fintech.group_finance_data.fact_orders_profitability`
+  WHERE registered_date>=DATE_TRUNC(start_date,month)
+  AND registered_date  <= end_date
+),
+
+exchnage_monthly AS
+(
+SELECT DISTINCT DATE_TRUNC(registered_date,month) as month_date,country_id,monthly_rate_eu,
+FROM  `peya-fraud-and-fintech.group_finance_data.fact_orders_profitability`
+WHERE registered_date>=DATE_TRUNC(start_date,month)
+  AND registered_date  <= end_date
+),
+
+exchange_weekly AS
+(
+SELECT DISTINCT DATE_TRUNC(registered_date,isoweek) as isoweek_date,country_id,weekly_rate_eu,
+FROM  `peya-fraud-and-fintech.group_finance_data.fact_orders_profitability`
+WHERE registered_date>=DATE_TRUNC(start_date,month)
+  AND registered_date  <= end_date
+),
+
+gmv_share_monthly_country AS #17 GB
+(
+  SELECT  DATE_TRUNC(registered_date,month) as month_date,country_id,SUM(gmv.gmv_vendor/monthly_rate_eu) as gmv_monthly_country
+  FROM fact_orders_profitability
+  WHERE registered_date>=DATE_TRUNC(start_date,month)
+    AND registered_date  <= end_date
+  GROUP BY 1,2
+),
+
+gmv_share_monthly_Latam AS #17 GB
+(
+  SELECT  DATE_TRUNC(registered_date,month) as month_date,SUM(gmv.gmv_vendor/monthly_rate_eu) as gmv_monthly_latam
+  FROM fact_orders_profitability
+  WHERE registered_date>=DATE_TRUNC(start_date,month)
+    AND registered_date  <= end_date
+  GROUP BY 1
+),
+
+gmv_share_weekly_country AS #17 GB
+(
+  SELECT  DATE_TRUNC(registered_date,isoweek) as isoweek_date,country_id,SUM(gmv.gmv_vendor/monthly_rate_eu) as gmv_weekly_country
+  FROM fact_orders_profitability
+  WHERE registered_date>=DATE_TRUNC(start_date,month)
+    AND registered_date  <= end_date  GROUP BY 1,2
+),
+
+gmv_share_weekly_Latam AS #17 GB
+(
+  SELECT  DATE_TRUNC(registered_date,isoweek) as isoweek_date,SUM(gmv.gmv_vendor/monthly_rate_eu) as gmv_weekly_latam
+  FROM fact_orders_profitability
+  WHERE registered_date>=DATE_TRUNC(start_date,month)
+    AND registered_date  <= end_date
+  GROUP BY 1
+),
+
+shopping_missions as
+(
+  SELECT
+  order_id,
+  mission_type,
+  FROM `peya-bi-tools-pro.il_qcommerce.fact_groceries_shopping_missions`
+  WHERE registered_date >= start_date
+    AND registered_date  <= end_date
+),
+
+shopper as
+(
+  SELECT yyyymmdd, restaurant_id, 
+  FROM `peya-bi-tools-pro.il_core.dim_historical_partners` 
+  WHERE shopper_type_id=2
+  AND is_darkstore IS FALSE
+  AND yyyymmdd>=start_date
+    AND yyyymmdd  <= end_date
+),
+
+
+franchise AS
+(
+  SELECT DISTINCT
+  partner_id,
+  is_darkstore,
+  franchise.franchise_name as franchise,
+  FROM `peya-bi-tools-pro.il_core.dim_partner`
+ 
+),
+
+
+service_level as
+(
+
+  select DISTINCT
+    flo.peya_order_id as order_id,
+    CASE WHEN flo.is_vendor_late_10 = 1 AND UPPER(flo.order_status) = 'COMPLETED' THEN flo.order_id END AS vend_late_10 ,
+    flo.estimated_prep_time*1.000/60  AS prep_time,
+    COALESCE(CASE WHEN UPPER(flo.order_status) = 'COMPLETED' THEN flo.timings.actual_delivery_time END, 0)/ 60 AS delivery_time,
+    flo.is_order_late_10,
+    flo.is_vendor_late_10,
+    flo.is_rider_late_10,
+    IF(DATETIME_DIFF(pue.CheckoutCoinfirmedAt,flo.original_scheduled_pickup_at,MINUTE)>5,1,0) is_shopper_late_5,
+    MAX(timings.vendor_late) as vendor_late, 
+    MAX(timings.rider_late) as rider_late,
+    MAX(timings.order_delay) as order_delay,
+
+
+
+    from `peya-bi-tools-pro.il_logistics.fact_logistic_orders`  flo
+
+    LEFT JOIN `peya-data-origins-pro.cl_pelican.orders` po
+    ON flo.peya_order_id = SAFE_CAST(po.external_id as int64)
+
+    LEFT JOIN 
+    (
+    SELECT order_id, MAX(CheckoutCoinfirmedAt) as CheckoutCoinfirmedAt
+    FROM `peya-chile.user_andres_musetti.Pelican_Events_UNIFICADA` pue
+    GROUP By 1
+    ) pue
+    ON po.id=pue.order_id
+
+
+    WHERE flo.created_date_local >= start_date
+    AND flo.created_date_local <= end_date
+    #AND pue.yyyymmdd>=start_date
+    AND po.yyyymmdd>= start_date
+    AND po.yyyymmdd<= end_date
+    #AND FechaDate>=start_date
+
+    GROUP BY ALL
+),
+
+skus as
+(
+SELECT 
+registered_date,
+order_id,
+SUM(IF(level_one IN (
+  --ULTRA FRESH
+  "Produce",
+  "Ready To Consume",
+  "Meat / Seafood"),total_amount,0)) as gfv_ufresh,
+  SUM(IF(level_one IN (
+  --ULTRA FRESH
+  "Produce",
+  "Ready To Consume",
+  "Meat / Seafood"),total_amount,0)) as gfv_fresh,
+  SUM(IF(level_one IN (
+  -- FRESH
+  "Bread / Bakery",
+  "Dairy / Chilled / Eggs",
+  --ULTRA FRESH
+  "Produce",
+  "Ready To Consume",
+  "Meat / Seafood"),total_amount,0)) as gfv_FUF,
+  
+FROM `peya-food-and-groceries.automated_tables_reports.qc_performance_order_sku` sku
+WHERE registered_date>=start_date
+AND registered_date <= end_date
+GROUP BY ALL
+),
+
+
+pelican_product as
+(
+SELECT
+order_id,
+created_at,
+is_custom,
+status,quantity,
+pickup_quantity,
+replaced_product_id,
+external_id,
+name
+FROM `peya-data-origins-pro.cl_pelican.product`
+WHERE DATE(created_at)>=start_date
+AND DATE(created_at)<=end_date
+),
+
+
+found_fill_rate as
+(
+  SELECT
+
+  orders.external_id,
+  fo.order_id,
+  orders.is_completed,
+  orders.is_preorder,
+  COUNT(DISTINCT CASE WHEN product.unit_price != product.pickup_unit_price THEN CAST (orders.external_id AS STRING)ELSE NULL END) AS price_modif,
+  COUNT(DISTINCT CASE WHEN  product.quantity != product.pickup_quantity OR product.status IN ('REPLACED') OR product.status IN ('NOT_FOUND') OR product.is_custom =TRUE THEN CAST (orders.external_id AS STRING)ELSE NULL END) AS qty_modif,
+  COUNT(DISTINCT CASE WHEN (product.pricing_type = "UNIT" AND product.quantity > product.pickup_quantity) OR (product.pricing_type = "KG" AND (CAST(product.quantity AS FLOAT64)*0.85) > product.pickup_quantity) OR product.status IN ('REPLACED') OR product.status IN ('NOT_FOUND') THEN CAST (orders.external_id AS STRING)ELSE NULL END) AS partial_order,
+  COUNT (DISTINCT CASE WHEN product.unit_price != product.pickup_unit_price OR orders.checkout_discounts LIKE '%Descuento de vendedor%' OR product.quantity != product.pickup_quantity OR product.status IN ('REPLACED') OR product.status IN ('NOT_FOUND') OR product.is_custom =TRUE OR product.total_price != product.pickup_total_price THEN CAST (orders.external_id AS STRING) ELSE NULL END) AS total_mod,
+  COUNT(DISTINCT CASE WHEN product.is_custom =TRUE THEN CAST (orders.external_id AS STRING) ELSE NULL END) AS is_custom,
+  COUNT(DISTINCT CASE WHEN orders.checkout_discounts LIKE '%Descuento de vendedor%' THEN CAST (orders.external_id AS STRING)ELSE NULL END) AS discout,
+  COUNT(DISTINCT CASE WHEN product.status IN ('NOT_FOUND') THEN CAST (orders.external_id AS STRING) ELSE NULL END) AS qty_not_found,
+  COUNT(DISTINCT CASE WHEN product.status IN ('REPLACED') THEN CAST (orders.external_id AS STRING) ELSE NULL END) AS qty_replaced,
+  COUNT(DISTINCT CASE WHEN product.status IN ('REPLACED', 'NOT_FOUND') THEN CAST (orders.external_id AS STRING) ELSE NULL END) AS qty_rep_y_not_found,
+  COUNT(DISTINCT orders.external_id) AS qty_orders,
+
+SUM(case when product.is_custom = FALSE AND replaced_product_id is null  then product.quantity else 0 end) AS original_requested_quantity, --Cantidad pedida por el cliente (denonimador del Found Rate y Fill Rate)
+    SUM(case when product.is_custom = FALSE then product.pickup_quantity else 0 end) AS original_picked_quantity, -- Cantidad pickeada por el Shopper (numerador del Found Rate) Cuantos pickeaste del pedido original
+    SUM(case when product.status = "IN_CART" then product.pickup_quantity else 0 end) AS final_picked_quantity, -- Cantidad pickeada por el Shopper (numerador del Fill Rate) cuandos del original + reemplazados
+    COUNT(DISTINCT CASE WHEN product.status = 'IN_CART' AND replaced_product_id is not null THEN CONCAT(fo.order_id,product.name)END) as replacement_in_cart,
+    COUNT(DISTINCT CASE WHEN replaced_product_id is null AND product.status in ('REPLACED', 'NOT_FOUND') THEN CONCAT(fo.order_id,product.name)END) as prods_oos,
+    SUM(CASE 
+        WHEN product.status = 'REPLACED' AND product.is_custom = FALSE AND product.replaced_product_id IS NULL THEN product.quantity 
+        ELSE 0 
+    END) AS Replaced_Products,-- De los SKU originales, cantidad de unidades que cerraron en SKUs de status = REPLACED --
+SUM(CASE 
+        WHEN product.status = 'NOT_FOUND' AND product.is_custom = FALSE AND product.replaced_product_id IS NULL THEN product.quantity 
+        ELSE 0 
+    END) AS NotFound_Products,
+
+MAX(po.payment_total_gross) as original_requested_total_price,
+
+FROM `peya-bi-tools-pro.il_core.fact_orders` fo
+
+INNER JOIN `peya-data-origins-pro.cl_pelican.orders` orders
+ON CAST(fo.order_id AS STRING) = orders.external_id
+
+INNER JOIN `peya-data-origins-pro.cl_pelican.product` AS product
+ON orders.id = product.order_id
+
+    INNER JOIN 
+    (SELECT external_id,id,is_test,MAX(payment_total_gross) as payment_total_gross 
+    FROM `peya-data-origins-pro.cl_pelican.orders`
+    WHERE yyyymmdd>=start_date
+    GROUP BY ALL) po
+    ON CAST(fo.order_id AS STRING) = po.external_id
+
+WHERE
+  fo.registered_date >= start_date
+  AND fo.registered_date <= end_date
+  AND orders.yyyymmdd  >= start_date
+  AND orders.yyyymmdd <= end_date
+  AND DATE(product.created_at) >= start_date
+  AND DATE(product.created_at) <= end_date
+  AND orders.checkout_confirmed_total>0
+  AND fo.business_type.business_type_name in ("Drinks", "Pets", "Shop", "Pharmacy", "Market", "Kiosks")
+
+GROUP BY ALL
+
+),
+
+
+PTT as
+(
+  SELECT  
+    order_id,
+    sum(qty_sold_with_discount_applied) as promo_items_pt
+    FROM `peya-bi-tools-pro.il_qcommerce.promo_tool_transactions_v2`
+    WHERE registered_date >= start_date
+    AND registered_date<= end_date
+  group by 1
+),
+
+
+PCM as
+(
+    SELECT
+    pcm.order_id,
+    sum(pd.quantity) as promo_items_pcm,
+   
+    FROM `peya-data-origins-pro.cl_pcm.order_discount` as pcm
+    LEFT JOIN UNNEST (products_discount) pd
+    group by 1
+),
+
+fact_by_customers as
+(
+
+SELECT  
+  pc.order_id,
+  nro_order_confirmed, 
+  nro_order_confirmed_groceries, 
+  nro_order_confirmed_qc, 
+  nro_order_confirmed_dmart,
+  nro_order_confirmed_aaa, 
+  first_purchase_date_qc, 
+  first_purchase_date_aaa,
+  first_purchase_date_peya, 
+  first_purchase_date_groceries,
+  oi.* EXCEPT(order_id)
+
+FROM `peya-bi-tools-pro.il_core.fact_peya_orders_by_customers` pc
+LEFT JOIN  `peya-food-and-groceries.automated_tables_reports.qc_performance_order_intermitency`  oi
+ ON pc.order_id=oi.order_id
+ AND DATE(pc.registered_date)=DATE(oi.registered_date)
+
+WHERE registered_date_partition >= start_date
+AND registered_date_partition <= end_date
+),
+
+ciudades_logisticas as
+(
+  SELECT month_date, partner_id,city_name_lz
+  FROM `peya-food-and-groceries.automated_tables_reports.qc_coverage_partner_shapes`
+  WHERE month_date>=start_date
+  AND month_date <= end_date
+  GROUP BY ALL
+)
+
+
+    SELECT DISTINCT
+      DATE_TRUNC(fo.registered_date, MONTH) AS month_date,
+      FORMAT_DATE('%G-%V',fo.registered_date) AS Isoweek_Year,
+      fo.registered_date,
+      fo.order_id,
+      fo.customer_id,
+      p.user.is_user_plus,
+      fo.order_status,
+      f.is_darkstore,
+      restaurant.id as partner_id,
+      restaurant.name as partner_name,
+      COALESCE(aaa.franchise,f.franchise) as franchise,
+      IF(sh.restaurant_id IS NOT NULL,1,0) as is_shopper,
+      AAA.clasificacion,
+      fo.business_type.business_type_name as segment,
+      fo.country.country_code AS cc,
+      fo.country.country_id as country_id,
+      city_name_lz as city,
+     
+      sm.mission_type,
+      IF(fo.order_status="CONFIRMED",1,0) as confirmed_orders,
+      CASE
+        WHEN fo.order_status = 'REJECTED'
+        AND fo.fail_rate_owner_restaurant = 1
+        THEN 1 ELSE NULL END
+      as rejected_orders,
+      IF(fo.rejected_order = 1 and fo.rejectMessage.globalCode = 'ITEM_UNAVAILABLE',1,0) AS qty_oos_fail_rate_orders, 
+      count_orders_inaccuracy as inaccuracy_order,
+      1 as total_orders,
+      nro_order_confirmed as nro_orden_peya,
+      nro_order_confirmed_qc as nro_orden_qc,
+      nro_order_confirmed_aaa as nro_orden_aaa,
+      nro_order_confirmed_groceries as nro_orden_groceries,
+      first_purchase_date_qc,
+      first_purchase_date_aaa as first_order_date_aaa,
+
+
+      CASE WHEN fo.order_status ='CONFIRMED' THEN fo.qty_total_products ELSE NULL END basket_units,
+      Replaced_Products,
+      NotFound_Products,
+
+      replacement_in_cart,
+      original_picked_quantity,
+      original_requested_quantity,
+      final_picked_quantity,
+      
+      prods_oos,
+      partial_order,
+      qty_orders as pelican_order,
+      items_oos_delivered,
+      items_ordered,
+      
+      df_paid_by_partner/monthly_rate_eu as df_paid_by_partner, -- sobre el Delivery fee listed 
+      basket_paid_by_partner/monthly_rate_eu as basket_paid_by_partner, --sobre el GFV, no se incluye en el GMV y ni GFV
+      voucher_paid_by_partner/monthly_rate_eu as voucher_paid_by_partner, -- no se incluye en GMV ni GFV
+      other_paid_by_partner/monthly_rate_eu as other_paid_by_partner,
+
+      IF(v.order_id IS NOT NULL AND paid_by_partner>0,1,0) AS discount_orders,
+      paid_by_partner/monthly_rate_eu as VFD,
+      paid_by_company/monthly_rate_eu as CFD,
+      paid_by_3party/monthly_rate_eu as TPFD,
+   
+    (CASE WHEN fo.order_status = 'CONFIRMED' THEN p.gmv.gfv_vendor/ce.rate_eu ELSE NULL END) AS gfv_gross,
+    (CASE WHEN fo.order_status = 'CONFIRMED' THEN p.gmv.gfv_vendor ELSE NULL END) AS gfv_gross_LC,
+    (CASE WHEN fo.order_status = 'CONFIRMED' THEN p.gmv.gmv_vendor/ce.rate_eu ELSE NULL END) AS gmv_gross,
+    (CASE WHEN fo.order_status = 'CONFIRMED' THEN p.gmv.gmv_vendor ELSE NULL END) AS gmv_gross_LC,
+    (CASE WHEN fo.order_status = 'CONFIRMED' THEN p.gmv.gmv_user/ce.rate_eu ELSE NULL END) AS gmv_user,
+    (CASE WHEN fo.order_status = 'CONFIRMED' THEN p.gmv.gmv_user ELSE NULL END) AS gmv_user_LC,
+    confirmed_gmv/ce.rate_eu as gmv_with_discount_by_peya,
+    
+    skus.gfv_fresh,
+    skus.gfv_ufresh,
+    skus.gfv_fuf,
+    p.gmv.minimum_order_value/weekly_rate_eu as mov,
+    monthly_rate_eu,
+    weekly_rate_eu,
+   
+    safe_divide(fo.discount , fo.amount_no_discount) as perc_order_discount,
+    promo_items_pt,
+    promo_items_pcm,
+    coalesce((PTT.promo_items_pt),0) + coalesce((PCM.promo_items_pcm),0) as promo_items,
+
+    distance_meters as deliveries_distance, 
+    sl.delivery_time,
+    sl.prep_time,
+    sl.is_shopper_late_5,
+    sl.is_order_late_10,
+    sl.is_vendor_late_10,
+    sl.is_rider_late_10,
+    sl.order_delay,
+    sl.vendor_late,
+    sl.rider_late,
+    dps_small_order_fee_eur,
+SAFE_DIVIDE(take_in,COALESCE(monthly_rate_eu,rate_eu)) as take_in,
+
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN  (p.commission.commission+ic_dmart.commission.ic_dmart_commission-p.commission.commission_op) END),COALESCE(monthly_rate_eu,rate_eu)) as commission,
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN p.commission.commission_op END),COALESCE(monthly_rate_eu,rate_eu)) as commission_op,
+    SAFE_DIVIDE((CASE WHEN partner.vertical_group <> 'D-Mart' THEN COALESCE(delivery_fee_user+priority_fee,0) END),COALESCE(monthly_rate_eu,rate_eu)) as delivery_fe_user,
+    SAFE_DIVIDE(gmv.shipping_amount_no_discount,COALESCE(monthly_rate_eu,rate_eu)) as shipping_amount_no_discount,
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN delivery_fee_vendor_plus END),COALESCE(monthly_rate_eu,rate_eu)) as delivery_fe_user_plus,
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN COALESCE(CASE WHEN partner.vertical_group <> 'D-Mart' THEN COALESCE(p.service_fee,0) END,0) END),COALESCE(monthly_rate_eu,rate_eu)) as service_fee,
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN subscription_fee END),COALESCE(monthly_rate_eu,rate_eu)) as subscription_fee,   
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN subscription_fee_third END),COALESCE(monthly_rate_eu,rate_eu)) as visa_subscription_fee,
+    joker_fee,
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN other_revenue END),COALESCE(monthly_rate_eu,rate_eu)) as other_revenue,
+
+SAFE_DIVIDE(total_cost,COALESCE(monthly_rate_eu,rate_eu)) as total_cost,
+
+    SAFE_DIVIDE(IF(partner.vertical_group<>'D-Mart',p.rider_cost.rider_cost,0),COALESCE(monthly_rate_eu,rate_eu)) as rider_cost,
+    SAFE_DIVIDE((payment_cpo),COALESCE(monthly_rate_eu,rate_eu)) as payment_cpo,
+    SAFE_DIVIDE((fda.fda)-(fda.user_refund_dmart)+(ic_dmart.ic_dmart_wastage),COALESCE(monthly_rate_eu,rate_eu)) as food_delivery_accident_cpo,
+    SAFE_DIVIDE((shoppers_cost),COALESCE(monthly_rate_eu,rate_eu)) as shoppers_cost,
+    SAFE_DIVIDE((CASE WHEN partner.vertical_group <> 'D-Mart' THEN COALESCE(semivariable_delivery_cpo,0) END),COALESCE(monthly_rate_eu,rate_eu))  as semivariable_delivery_cpo,
+    SAFE_DIVIDE((CASE WHEN fo.order_status = 'CONFIRMED' THEN pick_up_discount END),COALESCE(monthly_rate_eu,rate_eu)) as pick_up_discount,  
+    SAFE_DIVIDE((other_non_specific_cpo),COALESCE(monthly_rate_eu,rate_eu)) as other_non_specific_cpo,
+
+    SAFE_DIVIDE(gpo.gpo,COALESCE(monthly_rate_eu,rate_eu)) as gpo,
+
+    SAFE_DIVIDE((basket_incentives_platform),COALESCE(monthly_rate_eu,rate_eu)) as basket_incentives_platform,
+    SAFE_DIVIDE((IF(partner.vertical_group<>'D-Mart',basket_incentives_dmart,0)),COALESCE(monthly_rate_eu,rate_eu)) as basket_incentives_dmart,
+    SAFE_DIVIDE((plus_incentives),COALESCE(monthly_rate_eu,rate_eu)) as plus_incentives,
+    SAFE_DIVIDE(((IF(partner.vertical_group='D-Mart',ic_dmart.ic_dmart_df_plus ,0))),COALESCE(monthly_rate_eu,rate_eu)) as ic_df_plus_dmart,
+
+SAFE_DIVIDE(gpo.gpo_fl,COALESCE(monthly_rate_eu,rate_eu)) as gpo_fl,   
+
+    gmv_monthly_country,
+    gmv_monthly_latam,
+    gmv_weekly_country,
+    gmv_weekly_latam,
+
+    chc.total_contacts_hc,
+    chc.sat_ac_cont,
+    chc.resp_ac_cont,
+
+    shc.total_sessions_hc,
+    has_mec,
+
+    FROM `peya-bi-tools-pro.il_core.fact_orders` AS fo
+ 
+    INNER JOIN partners_AAA AAA
+    ON AAA.partner_id=fo.restaurant.id
+    AND aaa.snapshot_date=fo.registered_date
+   
+    LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS dim_country__currency_id 
+    ON fo.country_id = dim_country__currency_id.country_id
+   
+    LEFT JOIN fact_orders_profitability p
+    ON p.order_id=fo.order_id
+   
+    LEFT JOIN franchise f
+    ON f.partner_id=fo.restaurant.id
+   
+    LEFT JOIN `peya-bi-tools-pro.il_core.dim_currency_exchange` AS ce
+    ON ce.currency_exchange_date = DATE_TRUNC(fo.registered_date,MONTH)
+    AND ce.currency_id = fo.restaurant.country.currency.id
+
+    -- LEFT JOIN  affordable_orders d ON  
+    -- fo.order_id=d.order_id
+
+    LEFT JOIN service_level sl ON
+    sl.order_id=fo.order_id
+
+    LEFT JOIN fact_by_customers pu
+    ON pu.order_id=fo.order_id
+
+    LEFT JOIN found_fill_rate pe
+    ON pe.order_id=fo.order_id    
+
+    LEFT JOIN shopping_missions sm
+    ON sm.order_id=fo.order_id
+
+    LEFT JOIN inaccuracy i
+    ON i.order_id=fo.order_id
+
+    LEFT JOIN PTT
+    ON ptt.order_id=SAFE_CAST(fo.order_id AS STRING)
+
+    LEFT JOIN PCM
+    ON PCM.order_id=fo.order_id
+
+    LEFT JOIN items_not_delivered id
+    ON id.order_id=SAFE_CAST(fo.order_id AS STRING)
+ 
+    LEFT JOIN gmv_share_monthly_country gmv_smc
+    ON gmv_smc.month_date=DATE_TRUNC(fo.registered_date,month)
+    AND gmv_smc.country_id=fo.country.country_id
+
+    LEFT JOIN gmv_share_monthly_LATAM gmv_sml
+    ON gmv_sml.month_date=DATE_TRUNC(fo.registered_date,month)
+
+    LEFT JOIN gmv_share_weekly_country gmv_swc
+    ON gmv_swc.isoweek_date=DATE_TRUNC(fo.registered_date,isoweek)
+    AND gmv_swc.country_id=fo.country.country_id
+
+    LEFT JOIN gmv_share_weekly_LATAM gmv_swl
+    ON gmv_swl.isoweek_date=DATE_TRUNC(fo.registered_date,isoweek)
+
+    LEFT JOIN skus 
+    ON skus.order_id=fo.order_id
+    AND skus.registered_date=fo.registered_date
+   
+    LEFT JOIN contacts_help_center chc
+    ON chc.order_id=fo.order_id
+
+    LEFT JOIN sessions_help_center shc
+    ON shc.order_id=SAFE_CAST(fo.order_id as STRING)
+
+    LEFT JOIN sof 
+    ON sof.platform_order_code=SAFE_CAST(fo.order_id AS STRING)
+
+    LEFT JOIN shopper sh
+    ON sh.restaurant_id=fo.restaurant.id
+    AND sh.yyyymmdd=fo.registered_date
+
+    LEFT JOIN VFD v
+    ON v.order_id=fo.order_id
+
+    LEFT JOIN ciudades_logisticas cl
+    ON cl.partner_id=fo.restaurant.id
+    AND cl.month_date=DATE_TRUNC(fo.registered_date,month)
+
+    WHERE  
+    fo.registered_date >= start_date
+    AND fo.registered_date <= end_date
+    AND fo.country.country_id IS NOT NULL --saca las ordenes de prueba
+
+

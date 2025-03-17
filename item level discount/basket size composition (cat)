@@ -1,0 +1,64 @@
+DECLARE date_from DATE DEFAULT '2025-01-01';
+DECLARE date_to DATE DEFAULT '2025-02-28';
+
+with
+
+orders_bsize AS
+
+(
+  SELECT
+  fo.id as order_id,
+  fo.vendor.id as partner_id,
+  user.id as user_id,
+  user_segment,
+  dvp.remote_product_id,
+  dvp.level_one,
+  dvp.level_two,
+  dvp.level_three,
+  CASE WHEN SAFE_DIVIDE(subtotal,quantity) IN (1,2,3) AND d.quantity >= 50 THEN 1 ELSE d.quantity END as qty
+  --SUM(CASE WHEN SAFE_DIVIDE(subtotal,quantity) IN (1,2,3) AND d.quantity >= 50 THEN 1 ELSE d.quantity END) qty_total_products
+  --d.quantity,
+  --d.subtotal
+FROM
+  `peya-data-origins-pro.cl_core.orders_service` fo, UNNEST(details) d 
+INNER JOIN
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+  aaa.partner_id = fo.vendor.id
+LEFT JOIN
+  (SELECT snapshot_date,remote_vendor_id,remote_product_id,master_category_names.level_one,master_category_names.level_two,master_category_names.level_three FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` WHERE snapshot_date BETWEEN date_from AND date_to) dvp
+ON
+   dvp.snapshot_date = DATE(fo.registered_date) AND dvp.remote_vendor_id = fo.vendor.id AND dvp.remote_product_id = d.product.id
+LEFT JOIN `peya-bi-tools-pro.il_qcommerce.fact_user_segmentation_snapshot` as us
+  ON  us.user_id = fo.user.id
+  AND us.snapshot_date = date_trunc(DATE(fo.registered_date), month)
+LEFT JOIN 
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = fo.vendor.id
+WHERE
+  DATE(fo.registered_date) BETWEEN date_from AND date_to
+AND dp.business_type.business_type_name NOT IN('Restaurant','Courier','Coffee','Courier Business') 
+AND
+  us.snapshot_date BETWEEN date_from AND date_to
+AND
+  fo.state = 'CONFIRMED'
+AND
+  aaa.franchise = 'Ta-Ta-UY'
+-- AND
+  -- dvp.level_one IS NOT NULL
+GROUP BY
+  ALL
+)
+
+
+
+
+SELECT
+  user_segment,
+  SUM(qty) as basket_units,
+  COUNT(DISTINCT order_id) as confirmed_orders
+FROM
+  orders_bsize
+GROUP BY
+  1

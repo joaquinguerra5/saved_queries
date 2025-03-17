@@ -1,0 +1,116 @@
+DECLARE date_from DATE DEFAULT DATE_ADD(CURRENT_DATE(), INTERVAL -30 DAY);
+DECLARE date_to DATE DEFAULT DATE_ADD(CURRENT_DATE(), INTERVAL -1 DAY);
+
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.fs_promo_prospect_new` 
+
+-- AS
+WITH 
+vendor_product AS (
+  SELECT DISTINCT
+    remote_vendor_id AS partner_id
+  , product_name
+  , remote_product_id AS product_id
+
+  FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+  INNER JOIN
+    `automated_tables_reports.partners_aaa_temporary` aaa
+  ON
+    aaa.partner_id = dvp.remote_vendor_id
+  WHERE remote_product_id IS NOT NULL  
+    AND aaa.franchise = 'Ta-Ta-UY'
+),
+original_rank AS (
+SELECT
+    moment
+  , pop.partner_id
+  , product_id
+  , product_name
+  , level_one
+  , level_two
+  , level_three
+  , SUM(confirmed_orders) as orders 
+  , SUM(any_click) as clicks 
+  , ROW_NUMBER() OVER (PARTITION BY moment, pop.partner_id ORDER BY SUM(any_click) DESC, SUM(add_cart) DESC, SUM(confirmed_orders), SUM(units_sold)  DESC, product_name DESC) AS rank
+FROM `peya-food-and-groceries.ml_qcommerce.il_popularity` pop
+INNER JOIN
+    `automated_tables_reports.partners_aaa_temporary` aaa
+  ON
+    aaa.partner_id = pop.partner_id
+WHERE 
+  date BETWEEN date_from AND date_to
+    AND (confirmed_orders > 0 AND any_click > 0)
+    AND aaa.franchise = 'Ta-Ta-UY'
+GROUP BY ALL
+ORDER BY moment, partner_id, rank ASC
+),
+-- similar AS (
+-- SELECT  
+--     moment
+--   , vp.partner_id
+--   , s.query_id as product_id
+--   , vp.product_name as similar_product_name
+--   , similares_id AS similar_product_id
+--   , TRUE as similar_tag
+--   , ROW_NUMBER() OVER (PARTITION BY moment, vp.partner_id, s.query_id ORDER BY ora.clicks DESC, ora.orders DESC, vp.product_name DESC) AS similar_rank   
+
+-- FROM `peya-bi-tools-pro.il_qcommerce.product_similarities` s,
+-- UNNEST(SPLIT(similares_id)) AS similares_id,
+-- UNNEST(["morning", "afternoon", "night"]) as moment
+
+-- LEFT JOIN vendor_product vp
+--   ON SAFE_CAST(similares_id AS STRING) = SAFE_CAST(vp.product_id AS STRING)
+-- LEFT JOIN original_rank ora
+--   ON moment = ora.moment AND SAFE_CAST(similares_id AS STRING) = SAFE_CAST(ora.product_id AS STRING)
+-- INNER JOIN
+--     `automated_tables_reports.partners_aaa_temporary` aaa
+--   ON
+--     aaa.partner_id = vp.partner_id
+
+-- ),
+-- intermediate_rank AS (
+-- SELECT
+--     moment
+--   , partner_id
+--   , CASE WHEN similar_tag IS FALSE THEN SAFE_CAST(master_product_id AS STRING)
+--          WHEN similar_tag IS TRUE THEN SAFE_CAST(similar_product_id AS STRING)
+--          ELSE NULL END AS product_id 
+--   , CASE WHEN similar_tag IS FALSE THEN SAFE_CAST(master_product_name AS STRING)
+--          WHEN similar_tag IS TRUE THEN SAFE_CAST(similar_product_name AS STRING)
+--          ELSE NULL END AS product_name
+--   , master_product_id
+--   , master_product_name
+--   , rank
+--   , similar_tag
+--   , similar_rank
+-- FROM (
+first_base AS ( -- productos sin similares
+SELECT 
+    ora.moment
+  , ora.partner_id
+  , ora.product_id as product_id
+  , ora.product_name as product_name
+  , ora.level_one
+  , ora.level_two
+  , ora.level_three
+  , ora.rank
+
+FROM original_rank ora
+ORDER BY ora.moment, ora.partner_id --AND SAFE_CAST(ora.product_name AS STRING) = SAFE_CAST(s.product_name AS STRING)
+)
+
+SELECT 
+    fr.moment
+  , fr.partner_id
+  , fr.product_id
+  , fr.product_name
+  , fr.level_one
+  , fr.level_two
+  , fr.level_three
+  -- , fr.rank
+  -- , fr.min_rank
+  , ROW_NUMBER() OVER (PARTITION BY fr.moment, fr.partner_id ORDER BY fr.rank ASC) AS final_rank
+FROM first_base fr
+ORDER BY moment, partner_id, final_rank
+
+-- select * from third_base where partner_id = 35734 and moment= "afternoon"

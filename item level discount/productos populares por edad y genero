@@ -1,0 +1,100 @@
+DECLARE date_from DATE DEFAULT DATE_ADD(CURRENT_DATE(), INTERVAL -30 DAY);
+DECLARE date_to DATE DEFAULT DATE_ADD(CURRENT_DATE(), INTERVAL -1 DAY);
+
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.fs_promo_prospect_new` 
+
+-- AS
+WITH 
+vendor_product AS (
+  SELECT DISTINCT
+    remote_vendor_id AS partner_id
+  , product_name
+  , remote_product_id AS product_id
+
+  FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+  INNER JOIN
+    `automated_tables_reports.partners_aaa_temporary` aaa
+  ON
+    aaa.partner_id = dvp.remote_vendor_id
+  WHERE remote_product_id IS NOT NULL  
+    AND aaa.franchise = 'Ta-Ta-UY'
+),
+
+original_rank AS (
+SELECT
+    moment
+  , pop.date  
+  , pop.partner_id
+  , pop.product_id
+  , pop.product_name
+  , level_one
+  , level_two
+  , level_three
+  , ua as user_id
+  , DATE_DIFF(date,DATE(u_b.data.birth), YEAR) as age
+  , u_g.gender
+FROM `peya-bi-tools-pro.il_qcommerce.popularity` pop, UNNEST(users_any_click) ua
+INNER JOIN
+    `automated_tables_reports.partners_aaa_temporary` aaa
+  ON
+    aaa.partner_id = pop.partner_id
+ LEFT JOIN
+    `peya-data-origins-pro.cl_core.user` as u_b
+  ON
+    SAFE_CAST(u_b.id as string) = ua
+LEFT JOIN
+   `peya-bi-tools-pro.il_growth.user_income` as u_g
+ ON
+   SAFE_CAST(user_id as string) = ua
+LEFT JOIN
+  vendor_product vp
+ON
+  vp.partner_id = pop.partner_id AND vp.product_id = pop.product_id
+WHERE 
+  date BETWEEN date_from AND date_to
+    AND (confirmed_orders > 0 AND any_click > 0)
+    AND aaa.franchise = 'Ta-Ta-UY'
+),
+
+base AS
+(SELECT
+--  moment,
+  CASE
+    WHEN age BETWEEN 0 AND 25 THEN '18-25'  
+    WHEN age BETWEEN 26 AND 40 THEN '26-40'
+    WHEN age BETWEEN 41 AND 55 THEN '41-55'
+    ELSE '55+' 
+  END AS age_group,
+  gender,
+  product_name,
+  level_one,
+  level_two,
+  level_three,
+  COUNT(DISTINCT user_id) as users_clicked,
+FROM
+  original_rank
+WHERE
+  age is not null
+AND
+  gender is not null
+AND
+  gender != '-'
+GROUP BY
+  ALL
+),
+
+ranker as
+(SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY age_group, gender ORDER BY users_clicked DESC, product_name)  as ranking
+FROM
+  base
+  )
+
+SELECT
+  *
+FROM
+  ranker
+WHERE
+  ranking <= 10
