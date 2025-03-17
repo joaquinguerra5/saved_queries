@@ -1,0 +1,14 @@
+SELECT
+month_date,
+cc,
+COUNT(DISTINCT IF(mission_type="fill in",customer_id,null)) as maus_aaa_fi,
+COUNT(DISTINCT IF(mission_type="stock up",customer_id,null)) as maus_aaa_su,
+COUNT(DISTINCT customer_id) as maus_aaa,
+ROUND(COUNT(DISTINCT IF(mission_type="fill in",customer_id,null))/COUNT(DISTINCT customer_id),2) as fill_in_share,
+ROUND(COUNT(DISTINCT IF(mission_type="stock up",customer_id,null))/COUNT(DISTINCT customer_id),2) as stock_up_share
+
+FROM `peya-food-and-groceries.automated_tables_reports.qc_AAA_order`
+
+WHERE order_status="CONFIRMED"
+GROUP BY ALL
+ORDER BY 1 desc
