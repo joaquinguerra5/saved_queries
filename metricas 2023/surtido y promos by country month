@@ -1,0 +1,211 @@
+
+
+
+WITH info_23 AS
+(
+SELECT
+  DATE_TRUNC(snapshot_date,MONTH) as month,
+  partner_id,
+  cc,
+  ROUND(AVG(active_products),0) as avg_active_products
+FROM
+
+(  SELECT
+    DATE_TRUNC(dvps.snapshot_date, MONTH) as snapshot_date,
+    partner_id,
+    cc,
+    COUNT(DISTINCT remote_product_id) as active_products
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    aaa.partner_id = dvps.remote_vendor_id AND aaa.snapshot_date = dvps.snapshot_date
+  WHERE
+  --   remote_vendor_id = 329470
+  -- AND
+    dvps.snapshot_date BETWEEN '2023-09-01' AND '2023-12-31'
+  AND
+    product_is_active
+  GROUP BY
+    ALL)
+GROUP BY
+  ALL
+),
+
+assortment AS (
+  SELECT
+    DATE_TRUNC(registered_date,MONTH) as registered_date,
+    partner_id,
+    cc,
+    avg_active_products
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.AAA_assortment_fundamentals_monthly` m
+  WHERE
+    registered_date BETWEEN '2024-01-01' AND '2025-02-28'
+),
+
+total_assortment as (
+  SELECT
+    *
+  FROM
+    assortment a
+  UNION ALL
+  SELECT
+    *
+  FROM
+    info_23 i
+),
+
+
+orders as (
+  SELECT
+  DISTINCT
+    month_date,
+    partner_id,
+    cc,
+    SUM(confirmed_orders) OVER(PARTITION BY month_date, partner_id) as confirmed_orders,
+    SUM(confirmed_orders) OVER(PARTITION BY month_date, cc) as confirmed_orders_country,
+    SAFE_DIVIDE(SUM(confirmed_orders) OVER(PARTITION BY month_date, partner_id),SUM(confirmed_orders) OVER(PARTITION BY month_date, cc)) as coeff_orders
+  FROM
+    `peya-food-and-groceries.user_joaquin_guerra.temp_qc_aaa_order` aaa
+),
+
+
+promo_products AS
+(
+SELECT
+  month_date,
+  partner_id,
+  cc,
+  avg_productos_promo_active,
+  -- confirmed_orders,
+  -- SUM(confirmed_orders) OVER(PARTITION BY p.month_date) as ordenes_totales,
+  -- SAFE_DIVIDE(confirmed_orders,SUM(confirmed_orders) OVER(PARTITION BY p.month_date)) * avg_productos_promo_active as promo_prods_weighted
+FROM  
+  (SELECT
+  Month_date,
+  partner_id,
+  cc,
+  COALESCE(avg_productos_promo_active,0) as avg_productos_promo_active
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_promo_fundamentals_monthly` p
+UNION ALL
+SELECT
+  promos.month,
+  promos.partner_id,
+  dp.country.country_code as cc,
+  COALESCE(promos.avg_active_products_in_promo,0) as avg_productos_promo_active
+FROM
+  `peya-food-and-groceries.user_joaquin_guerra.temp_promos_23` promos
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = promos.partner_id )) ,
+-- LEFT JOIN
+--   orders o
+-- ON
+--   o.month_date = p.month_date AND o.partner_id = p.partner_id
+
+
+SUMMARY as 
+(SELECT
+    ta.*
+  , clasificacion
+  , pp.avg_productos_promo_active
+  , o.confirmed_orders
+  , o.confirmed_orders_country
+  , o.coeff_orders
+  , SAFE_DIVIDE((CASE WHEN clasificacion = 'Supermarket' THEN o.confirmed_orders ELSE 0 END),(SUM(o.confirmed_orders) OVER(PARTITION BY registered_date,clasificacion,o.cc))) * avg_active_products as weight_active_prods_smk
+FROM
+  orders o 
+LEFT JOIN
+  total_assortment ta
+ON
+  ta.partner_id = o.partner_id AND DATE_TRUNC(ta.registered_date,MONTH) = DATE_TRUNC(o.month_date,MONTH)
+LEFT JOIN
+  promo_products pp
+ON
+  pp.partner_id = o.partner_id AND DATE_TRUNC(pp.month_date,MONTH) = DATE_TRUNC(o.month_date,MONTH)
+LEFT JOIN 
+  (SELECT
+    DISTINCT
+      partner_id,clasificacion FROM `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot`) clas
+    ON
+      clas.partner_id = ta.partner_id
+),
+
+asso_promos AS 
+(SELECT
+  registered_date as month,
+  cc,
+  SUM(COALESCE(avg_active_products,0)*COALESCE(coeff_orders,0)) as avg_active_products,
+  SUM(COALESCE(avg_productos_promo_active,0)*COALESCE(coeff_orders,0)) as avg_productos_promo_active,
+  SUM(weight_active_prods_smk) as avg_active_products_smk
+FROM
+  SUMMARY
+GROUP BY
+  ALL
+),
+
+UF as (
+  SELECT
+    DATE_TRUNC(uf_a.register_date,month) as month,
+    cc,
+    -- franchise,
+    ROUND(AVG(UF_active_products),0) as active_prods,
+    -- SUM(UF_GPV) as UF_GPV,
+    -- SUM(total_GPV) as total_GPV,
+    AVG(SAFE_DIVIDE(UF_GPV,total_GPV)) as uf_contrib
+
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.AAA_UF_contrib_disponibilidad_monthly_v2` uf_a
+  LEFT JOIN
+    `peya-food-and-groceries.automated_tables_reports.AAA_UF_contrib_GPV_monthly` uf_g
+  ON
+    uf_a.register_date = uf_g.register_date AND uf_a.partner_id = uf_g.partner_id
+  INNER JOIN
+    (SELECT DISTINCT month_date,partner_id FROM orders WHERE confirmed_orders > 0) o
+  ON
+    o.partner_id =  uf_a.partner_id AND o.month_date = DATE_TRUNC(uf_a.register_date,month)
+  LEFT JOIN 
+  (SELECT
+    DISTINCT
+      partner_id,clasificacion,cc,franchise FROM `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot`) clas
+    ON
+      clas.partner_id = uf_a.partner_id
+  WHERE
+    clas.clasificacion = 'Supermarket'
+  --AND
+    --DATE_TRUNC(uf_a.register_date,month) = '2025-02-01'
+  AND
+    CASE 
+      WHEN lower(franchise) LIKE '%santa mar%' AND partner_name LIKE 'Express' THEN TRUE
+      ELSE FALSE
+    END = FALSE
+    
+  GROUP BY
+    ALL
+  ORDER BY
+    2,3 DESC
+)
+
+
+
+SELECT
+  ap.month as month,
+  CONCAT(EXTRACT(YEAR FROM ap.month),"-",EXTRACT(quarter from ap.month)) as quarter,
+  ap.cc,
+  avg_active_products,
+  avg_active_products_smk,
+  avg_productos_promo_active,
+  UF.active_prods as uf_active_products,
+  UF.uf_contrib,
+FROM
+  asso_promos ap
+LEFT JOIN
+  UF 
+ON
+  UF.month = ap.month AND ap.cc = UF.cc
+GROUP BY
+  ALL
