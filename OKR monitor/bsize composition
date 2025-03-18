@@ -1,0 +1,91 @@
+DECLARE date_from DATE DEFAULT '2025-02-01';
+DECLARE date_to DATE DEFAULT '2025-02-28';
+
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.aaa_daily_basket_size_composition_L2`
+
+PARTITION BY day
+
+CLUSTER BY cc, franchise, partner_id, master_category_id
+
+AS
+
+WITH 
+  all_cats AS (
+    SELECT
+      day,
+      l2.*,
+      aaa.cc,
+      aaa.franchise,
+      aaa.partner_id,
+      aaa.partner_name,
+      COUNT(DISTINCT order_id) as orders_partner
+    FROM
+      `peya-food-and-groceries.automated_tables_reports.mvw_aaa_l2_categories` l2,
+      UNNEST(GENERATE_DATE_ARRAY(date_from,date_to,INTERVAL 1 day)) day
+    LEFT JOIN
+      `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+    ON
+      aaa.snapshot_date = day
+    LEFT JOIN
+      `peya-bi-tools-pro.il_core.fact_orders` fo
+    ON
+      fo.restaurant.id = aaa.partner_id AND fo.registered_date = day
+    WHERE
+      fo.registered_date BETWEEN date_from AND date_to
+    AND
+      order_status = 'CONFIRMED'
+    GROUP BY
+      ALL
+  ),
+
+
+
+prueba AS
+(SELECT
+  fo.registered_date,
+  aaa.partner_id,
+  dvps.master_category_ids.level_two,
+  SUM(d.quantity) basket_units
+FROM
+  `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+INNER JOIN
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+ON
+  aaa.partner_id = fo.restaurant.id AND aaa.snapshot_date = fo.registered_date
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+ON
+  dvps.remote_vendor_id = fo.restaurant.id AND dvps.snapshot_date = fo.registered_date AND dvps.remote_product_id = d.product.product_id
+WHERE
+  fo.registered_date BETWEEN date_from AND date_to
+AND
+  order_status = 'CONFIRMED'
+GROUP BY
+  ALL
+)
+
+SELECT
+  -- DATE_TRUNC(day,MONTH) as mes,
+  day,
+  ac.cc,
+  ac.franchise,
+  ac.partner_id,
+  ac.partner_name,
+  ac.master_category_id,
+  COALESCE(ac.level_one,'no_cat') as level_one,
+  COALESCE(ac.level_two,'no_cat') as level_two,
+  SUM(basket_units) as basket_units,
+  SUM(ac.orders_partner) as orders,
+  --SAFE_DIVIDE(SUM(basket_units),SUM(ac.orders_partner)) as bsize
+FROM
+  all_cats ac
+LEFT JOIN
+  prueba p
+ON
+  p.registered_date = ac.day AND COALESCE(p.level_two,"no_cat") = COALESCE(ac.master_category_id,'no_cat') AND ac.partner_id = p.partner_id
+-- WHERE
+--   ac.partner_id = 322860
+-- AND
+--   day BETWEEN '2025-02-01' AND '2025-02-01'
+GROUP BY
+  ALL
