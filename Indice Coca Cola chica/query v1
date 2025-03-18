@@ -1,0 +1,97 @@
+DECLARE date_from DATE DEFAULT '2025-02-01';
+DECLARE date_to DATE DEFAULT '2025-02-28';
+
+WITH cocas AS
+(
+SELECT
+  product_id as master_code,
+  product_name,
+  content_unit,
+  product_dimensions.size,
+  category_path,
+  CASE
+    WHEN REGEXP_CONTAINS(product_name, r'original|regular|clasica') THEN 'Regular'
+    WHEN REGEXP_CONTAINS(product_name, r'zero|azucar|azucares|cero') THEN 'Zero'
+    WHEN REGEXP_CONTAINS(product_name, r'light|diet|liviano|ligero') THEN 'Light'
+    WHEN REGEXP_CONTAINS(product_name, r'retornable') THEN 'Retornable'
+  ELSE 'Regular'
+  END as tipo,
+  CASE
+    WHEN content_unit = 'l' THEN product_dimensions.size
+    WHEN content_unit IN ('ml','cm3') THEN product_dimensions.size / 1000
+    WHEN content_unit = 'oz' THEN product_dimensions.size * 0.0295735
+  END
+    as size_liters,
+  product_status,
+FROM
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+WHERE
+  brands_name ='Coca-Cola'
+AND
+  content_unit IN ('l','ml','cm3','oz')
+AND
+  piece_barcode IS NOT NULL
+AND
+  CASE
+    WHEN content_unit = 'l' THEN product_dimensions.size
+    WHEN content_unit IN ('ml','cm3') THEN product_dimensions.size / 1000
+    WHEN content_unit = 'oz' THEN product_dimensions.size * 0.0295735
+  END IN (0.5,0.6,1,1.5,2,2.25,2.5,3)
+AND
+  category_path LIKE '/beverages/soft_drinks_mixers/%'
+AND
+  product_status = 'Active'
+AND
+  NOT REGEXP_CONTAINS(product_name, r'fanta|sprite|schweppes|x|unidades|promo')
+)
+
+-- SELECT
+--   *
+-- FROM
+--   cocas
+-- WHERE
+--   tipo = 'Regular'
+-- AND
+--   size_liters IN (0.5,0.6)
+
+SELECT
+  aaa.cc,
+  size_liters,
+  tipo,
+  ROUND(APPROX_QUANTILES(dvp.catalog_price_lc,100)[OFFSET(50)],2) as median_price_LC,
+  ROUND(APPROX_QUANTILES(dvp.catalog_price_lc/rate_eu,100)[OFFSET(50)],2) as median_price_EU
+FROM
+  (SELECT * FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` WHERE snapshot_date = date_to) dvp
+INNER JOIN  
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+  aaa.partner_id = dvp.remote_vendor_id
+INNER JOIN
+  `peya-bi-tools-pro.il_core.dim_historical_partners` dhp
+ON
+  dhp.restaurant_id = aaa.partner_id AND dhp.yyyymmdd = date_to
+INNER JOIN  
+  cocas c
+ON
+  c.master_code = dvp.master_code
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.country_code = aaa.cc
+LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_currency_exchange` AS dim_currency_exchange
+  ON
+    dim_currency_exchange.currency_exchange_date = DATE_TRUNC(date_to, month)
+    AND dim_currency_exchange.currency_id = dc.currency_id
+WHERE
+  product_is_active
+AND
+  size_liters IN (0.5,0.6)
+AND
+  tipo = 'Regular'
+AND
+  dhp.is_online
+AND
+  dhp.is_active
+GROUP BY
+  ALL
