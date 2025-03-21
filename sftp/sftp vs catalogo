@@ -1,0 +1,26 @@
+SELECT
+  aaa.franchise,
+  aaa.cc,
+  sftp.partner_id,
+  sftp.fileName,
+  COUNT(DISTINCT CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,""))) as total_products,
+  COUNT(DISTINCT CASE WHEN (COALESCE(quantity,0) > 0 OR COALESCE(active,0) > 0) THEN CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")) END) as active_products,
+  COUNT(DISTINCT CASE WHEN dvp.sku IS NULL AND (COALESCE(quantity,0) > 0 OR COALESCE(active,0) > 0) THEN CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")) ELSE NULL END) AS not_in_catalogue_ACTIVES,
+  COUNT(DISTINCT CASE WHEN dvp.sku IS NULL AND (COALESCE(quantity,0) = 0 AND COALESCE(active,0) = 0) THEN CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")) ELSE NULL END) AS not_in_catalogue_INACTIVES,
+  COUNT(DISTINCT CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,""))) as in_catalog,
+  COUNT(DISTINCT CASE WHEN COALESCE(quantity,0) > 0 AND COALESCE(quantity,0) < COALESCE(dvp.sales_buffer,0) THEN CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")) END) as ss_inactive,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN dvp.sku IS NULL AND (COALESCE(quantity,0) > 0 OR COALESCE(active,0) > 0) THEN CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")) ELSE NULL END) + COUNT(DISTINCT CASE WHEN dvp.sku IS NULL AND (COALESCE(quantity,0) = 0 AND COALESCE(active,0) = 0) THEN CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")) ELSE NULL END),COUNT(DISTINCT CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")))) error_pct,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN dvp.sku IS NULL AND (COALESCE(quantity,0) > 0 OR COALESCE(active,0) > 0) THEN CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")) ELSE NULL END),COUNT(DISTINCT CONCAT(COALESCE(sftp.sku,"-")," - ",COALESCE(sftp.barcode,"")))) error_pct_actives,
+
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_sftp_files` sftp
+INNER JOIN  
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+  aaa.partner_id = sftp.partner_id
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+ON
+  dvp.remote_vendor_id = sftp.partner_id AND (dvp.sku = sftp.sku OR LTRIM(dvp.barcodes,"0") = LTRIM(COALESCE(sftp.barcode,"---"),"0"))
+GROUP BY
+  ALL;
