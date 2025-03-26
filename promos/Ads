@@ -1,0 +1,39 @@
+SELECT 
+    date,
+    currency_code,
+    country,
+    account_id,
+    account_name,
+    account_type,
+    campaign_type,
+    placement,
+    pricing_model,
+    MIN(campaign_start_date) AS campaign_start_date,
+    MAX(campaign_end_date) AS campaign_end_date,
+    campaign_name,
+    SUM(impressions) AS impressions,
+    SAFE_DIVIDE(SUM(total_clicks), SUM(impressions)) AS CTR,     
+    SUM(total_clicks) AS total_clicks,
+    SUM(campaign_orders) AS campaign_orders,                  
+    SAFE_DIVIDE(SUM(campaign_orders), SUM(total_clicks)) AS CVR, 
+    SUM(unit_sold) AS unit_sold,                
+    SUM(sales_revenue) AS sales_revenue,
+    SUM(campaign_budget) AS campaign_budget,
+    SUM(ad_spend) AS ad_spend,
+    SAFE_DIVIDE(SUM(sales_revenue), SUM(ad_spend)) AS ROAS      
+FROM 
+    `fulfillment-dwh-production.curated_data_shared_adtech.qcadtech_agg_dmp_v2`
+WHERE 
+    DATE(date) BETWEEN '2025-03-01' AND '2025-03-26'  -- Filtrar fecha
+    AND country = 'Argentina'                           -- Filtrar país
+GROUP BY 
+    date,
+    currency_code,
+    country,
+    account_id,
+    account_name,
+    account_type,
+    campaign_type,
+    placement,
+    pricing_model,
+    campaign_name;
