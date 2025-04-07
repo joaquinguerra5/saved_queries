@@ -1,0 +1,53 @@
+DECLARE country_filter STRING DEFAULT "";
+DECLARE franchise_filter STRING DEFAULT "";
+
+-- Elegir parametros para filtrar (en caso de no querer filtrar por estos campos dejar la linea comentada con --)
+
+SET country_filter = 'AR';
+--SET franchise_filter = 'Carrefour-AR';
+
+------
+
+-- CONFIGURAMOS PARA QUE TRAIGA LOS REGISTROS DE LA ULTIMA VEZ QUE SE DESCARGARON LOS ARCHIVOS SFTP
+WITH date_config AS
+(
+SELECT
+  MAX(date) as day
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_sftp_files`
+)
+
+SELECT
+  aaa.cc,
+  aaa.franchise,
+  aaa.partner_id,
+  aaa.partner_name,
+  sftp.date,
+  sftp.sku,
+  sftp.barcode,
+  sftp.price,
+  sftp.active,
+  sftp.quantity,
+  sftp.maximum_sales_quantity
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_sftp_files` sftp
+INNER JOIN  
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+  aaa.partner_id = sftp.partner_id
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+ON
+  dvp.remote_vendor_id = sftp.partner_id AND (dvp.sku = sftp.sku OR LTRIM(dvp.barcodes,"0") = LTRIM(COALESCE(sftp.barcode,"---"),"0"))
+INNER JOIN
+  date_config dc
+ON 
+  dc.day = sftp.date
+WHERE
+  dvp.remote_vendor_id IS NULL -- El producto no matcheo con el catálogo
+AND
+  (CASE WHEN country_filter = "" THEN 1=1 ELSE country_filter = aaa.cc END)
+AND
+  (CASE WHEN franchise_filter = "" THEN 1=1 ELSE franchise_filter = aaa.franchise END)
+ORDER BY
+  3

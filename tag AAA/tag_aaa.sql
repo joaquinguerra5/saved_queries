@@ -5,7 +5,6 @@ WITH  orders AS (
   case
   When dim_partner.partner_name LIKE "AMPM%" AND dim_partner.country.country_code LIKE "CR" THEN "Ampm"
   When dim_partner.partner_name LIKE "Fresh Market%" AND dim_partner.country.country_code LIKE "CR" THEN "Fresh Market"
-  WHEN REGEXP_CONTAINS(lower(dim_partner.partner_name), r'la puerta del sol') AND dim_partner.country.country_code LIKE "GT" THEN "La Puerta Del Sol"
   ELSE dim_partner__franchise.franchise_name END as franchise,
   dim_partner.business_type.business_type_name as business_type,
   dim_partner.is_darkstore,
@@ -20,7 +19,7 @@ WITH  orders AS (
   LEFT JOIN  UNNEST([dim_partner.franchise]) AS dim_partner__franchise
   LEFT JOIN UNNEST([dim_partner.city]) as dim_partner__city
   WHERE  orders.registered_date between "2023-01-01" and current_date()
-  AND upper(orders.business_type.business_type_name)  IN ('MARKET','KIOSKS','DRINKS','PHARMACY')
+  AND upper(orders.business_type.business_type_name)  = 'MARKET'
 --  AND dim_partner.partner_name LIKE '%Luvebras%'
   GROUP BY 1,2,3,4,5,6,7,8,9
 ),
@@ -56,10 +55,10 @@ FROM orders
 WHERE (
 (orders.franchise_id IN (
   '0011r00002VoHgPAAV',	-- Supermercado DAR
---'0011r00002VoI9AAAV',	-- Dia (EXCLUIMOS POR EL RANKER)
+'0011r00002VoI9AAAV',	-- Dia (EXCLUIMOS POR EL RANKER)
 '0011r00002VoIJ0AAN',	-- Carrefour AR
 '001bO000006U6cUQAS', -- Carrefour DO
---'0011r00002VoIK8AAN',	-- Ampm
+--'001bO000006Twy4QAC',	-- Ampm
 --'0011r00002VoIK8AAN',	-- Fresh Market
 '0011r00002VoILLAA3',	-- Supermercado Comodin
 '0016900002f9CSHAA2',	-- Fresh Market
