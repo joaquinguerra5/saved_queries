@@ -1,0 +1,16 @@
+SELECT
+  sku,
+  product_name,
+  COUNT(DISTINCT CONCAT(date,sessionId,userid)) as sessions,
+  COUNT(DISTINCT CASE WHEN ranking_starter = 1 THEN CONCAT(date,sessionId,userid) END) as sessions_starter,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN ranking_starter = 1 THEN CONCAT(date,sessionId,userid) END),COUNT(DISTINCT CONCAT(date,sessionId,userid))) as starter_ratio
+FROM
+  `peya-food-and-groceries.automated_tables_reports.temp_aaa_starters`
+WHERE
+  date >= DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH)
+AND
+  franchise = 'La Anónima-AR'
+GROUP BY
+  ALL
+ORDER BY
+  starter_ratio DESC

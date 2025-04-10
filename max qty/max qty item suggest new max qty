@@ -1,0 +1,189 @@
+WITH partners_activos AS (
+  SELECT
+    DISTINCT partner_id
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.qc_AAA_order` qc
+  WHERE
+    registered_date >= DATE_SUB(CURRENT_DATE(),INTERVAL 2 MONTH)
+  AND
+    qc.franchise = 'Dia-AR'
+),
+
+pim as (
+  SELECT
+  product_id as master_code,
+  product_dimensions.width * product_dimensions.length * product_dimensions.height / 100 as volume_L,
+  CASE
+    WHEN content_unit IN ('g','kg','lb','oz') THEN 'kg'
+    WHEN content_unit IN ('l','ml','cl','cm3') THEN 'l'
+    ELSE 'units'
+  END as content_unit,
+  CASE 
+    WHEN  content_unit = 'g' THEN product_dimensions.size/1000
+    WHEN  content_unit = 'lb' THEN product_dimensions.size*0.453592
+    WHEN  content_unit = 'oz' THEN product_dimensions.size*0.0283495
+    WHEN  content_unit = 'ml' THEN product_dimensions.size/1000
+    WHEN  content_unit = 'cl' THEN product_dimensions.size/100
+    WHEN  content_unit = 'cm3' THEN product_dimensions.size/1000
+    WHEN  content_unit = 'cm' THEN 1 
+  ELSE 
+    product_dimensions.size
+  END as size,
+  COALESCE(((JSON_VALUE(product_attributes,"$.weightable_attributes.sold_by_piece") = "true") OR (JSON_VALUE(product_attributes,"$.weightable_attributes.sold_by_weight") = "true")),FALSE) as is_pesable
+
+FROM
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+),
+
+ productos AS
+(
+SELECT
+  remote_vendor_id as partner_id,
+  --aaa.partner_name,
+  --aaa.franchise,
+  dvp.remote_product_id,
+  dvp.global_product_id,
+  dvp.barcodes,
+  dvp.master_code,
+  dvp.sku,
+  dvp.product_name,
+  dvp.master_category_names.level_one,
+  dvp.master_category_names.level_two,
+  dvp.master_category_names.level_three,
+  dvp.master_category_ids.level_two as id_level_two,
+  pim.volume_L volume_L,
+  pim.content_unit,
+  pim.size,
+  ROUND(pim.size,0) as rounded_size,
+  maximum_sales_quantity,
+  --`peya-food-and-groceries.automated_tables_reports.getProductActivity`(remote_vendor_id, remote_product_id, '2024-10-01', CURRENT_DATE()) activity_rate
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+INNER JOIN
+  partners_activos aaa
+ON
+  aaa.partner_id = dvp.remote_vendor_id
+INNER JOIN
+  partners_activos pa
+ON
+  pa.partner_id = aaa.partner_id
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = aaa.partner_id
+LEFT JOIN
+  pim 
+ON
+  pim.master_code = dvp.master_code
+WHERE
+  pim.is_pesable = FALSE
+  --aaa.franchise = 'Carrefour-AR'
+--AND
+  --dp.partner_status = 'ON_LINE'
+--AND
+  --aaa.partner_id = 329470
+  ),
+
+product_orders AS (
+SELECT
+  fo.id order_id,
+  fo.vendor.id AS partner_id,
+  d.product.id as product_id,
+  SUM(CASE
+      WHEN SAFE_DIVIDE(subtotal,quantity) IN (1, 2, 3) AND d.quantity >= 50 THEN 1
+      ELSE d.quantity
+  END
+    ) qty_total_products,
+FROM
+  `peya-data-origins-pro.cl_core.orders_service` fo,
+  UNNEST(details) d
+INNER JOIN
+`peya-food-and-groceries.automated_tables_reports.partners_aaa_temporary` aaa
+ON
+aaa.partner_id = fo.vendor.id
+WHERE
+  DATE(fo.registered_date) BETWEEN '2024-10-01'
+  AND CURRENT_DATE()
+  AND fo.state = 'CONFIRMED'
+  --AND
+  --  aaa.partner_id = 329470
+  AND
+    d.quantity > 0
+GROUP BY
+  ALL ),
+
+base AS
+(SELECT
+  p.*,
+  COUNT(DISTINCT order_id) as confirmed_orders,
+  COUNT(DISTINCT CASE WHEN qty_total_products = p.maximum_sales_quantity THEN order_id ELSE NULL END) as orders_topped,
+  ROUND(SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN qty_total_products = p.maximum_sales_quantity THEN order_id ELSE NULL END),COUNT(DISTINCT order_id)),2) as topped_ratio,
+FROM
+  productos p
+LEFT JOIN
+  product_orders o
+ON
+  p.partner_id = o.partner_id
+AND
+  p.remote_product_id = o.product_id
+--WHERE
+  --maximum_sales_quantity<max_qty_total_franchise_no_0_active
+--OR
+  --maximum_sales_quantity<max_qty_total_franchise_vol_no_0_active
+GROUP BY
+  ALL
+),
+
+topes_sugeridos As (
+  SELECT
+  *
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_max_qty_limits_by_l2_gsheet`
+),
+
+
+base_final as 
+(SELECT
+  b.*,
+  t.suggested_max_qty as suggested_max_qty,
+FROM
+  base b
+LEFT JOIN
+  topes_sugeridos t
+ON
+  t.l2_id = b.id_level_two AND b.size BETWEEN t.from_size AND t.to_size AND b.content_unit IN ('l','kg')
+WHERE
+  COALESCE(orders_topped,0) > 0
+
+
+),
+
+preview AS
+(SELECT
+  bf.*,
+  COALESCE(suggested_max_qty,maximum_sales_quantity) as final_max_qty
+FROM
+  base_final bf)
+
+SELECT
+  master_code,
+  sku,
+  product_name,
+  level_one,
+  level_two,
+  content_unit,
+  size,
+  ROUND(volume_L,2) as volume_L,
+  min(maximum_sales_quantity) as actual_max_qty,
+  ANY_VALUE(final_max_qty) as suggested_max_qty,
+  ROUND(CASE
+    WHEN content_unit IN ('l','kg') THEN COALESCE(size*ANY_VALUE(final_max_qty))
+    ELSE NULL
+  END,2) as suggested_total_weight
+FROM
+  preview
+GROUP BY
+  ALL
+
+
+

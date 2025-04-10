@@ -1,0 +1,79 @@
+  DECLARE day DATE DEFAULT '2025-04-07';
+ 
+--  CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.temp_aaa_starters` 
+
+--   PARTITION BY date
+
+--   CLUSTER BY cc, partner_id, sku 
+
+--  AS
+
+
+-- INSERT INTO `peya-food-and-groceries.automated_tables_reports.temp_aaa_starters` 
+
+WITH clicks As
+(
+SELECT
+      se.sessionId, 
+      se.clientId,
+      se.userId,
+      se.global_entity_id,  
+      se.platform,
+      date(se.partition_date) as date,
+      se.shopId,
+      aaa.partner_id,
+      aaa.franchise,
+      aaa.partner_name,
+      aaa.cc,
+      se.productSKU,
+      MAX(se.payload_timestamp_local) as payload_timestamp_local,
+      MAX(se.hit_number) as hit_number,
+
+    FROM `peya-data-origins-pro.cl_sessions.perseus_events` se
+
+    INNER JOIN `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+    ON SAFE_CAST(aaa.partner_id AS STRING) = se.shopid AND aaa.snapshot_date = date(se.partition_date)
+
+    /*INNER JOIN transactions t
+      ON  se.clientId         = t.clientId
+      AND DATE(se.partition_date) = t.date
+      AND se.sessionId        = t.sessionId
+      AND se.platform         = t.platform
+      AND se.global_entity_id = t.global_entity_id
+      AND se.shopId  = t.shopId*/
+
+    WHERE DATE(partition_date) = day
+
+
+      AND eventaction = 'add_cart.clicked'
+      --AND
+        --se.userId = '23010446'
+    GROUP BY ALL
+  )
+
+  SELECT
+    c.date,
+    c.sessionId,
+    c.userid,
+    c.cc,
+    c.franchise,
+    c.partner_id,
+    c.partner_name,
+    c.payload_timestamp_local,
+    c.hit_number,
+    ROW_NUMBER() OVER(PARTITION BY sessionId,clientId,date,partner_id ORDER BY hit_number ASC) as ranking_starter,
+    remote_product_id,
+    sku,
+    barcodes,
+    master_code,
+    product_name,
+    dvp.master_category_names.level_one,
+    dvp.master_category_names.level_two
+  FROM
+    clicks c
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvp
+  ON
+    c.shopid = SAFE_CAST(dvp.remote_vendor_id as string) AND c.productSKU = SAFE_CAST(dvp.remote_product_id AS STRING) AND dvp.snapshot_date = c.date
+  WHERE
+    dvp.snapshot_date = day

@@ -1,0 +1,110 @@
+DECLARE date_from DATE DEFAULT '2025-02-27';
+DECLARE date_to DATE DEFAULT '2025-03-05';
+DECLARE seasonal_category STRING DEFAULT 'Carnaval';
+
+WITH pop AS
+(
+SELECT
+  partner_id,
+  product_id,
+  level_two,
+  clicks,
+  SUM(clicks) OVER(PARTITION BY partner_id) as partner_clicks,
+  SUM(clicks) OVER(PARTITION BY partner_id,level_two) as partner_L2_clicks,
+  SAFE_DIVIDE(clicks,SUM(clicks) OVER(PARTITION BY partner_id)) as product_popularity_in_partner,
+  SAFE_DIVIDE(clicks,SUM(clicks) OVER(PARTITION BY partner_id,level_two)) as product_popularity_in_L2
+FROM
+  (SELECT
+    pop.partner_id,
+    pop.product_id,
+    pop.level_two,
+    SUM(any_click) as clicks
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.popularity` pop
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    aaa.partner_id = pop.partner_id AND pop.date = aaa.snapshot_date
+  WHERE
+    pop.date BETWEEN DATE_SUB(date_from,INTERVAL 1 MONTH) AND DATE_SUB(date_to,INTERVAL 1 DAY)
+  --  AND
+  --    pop.partner_id = 346155
+  GROUP BY
+    ALL)
+),
+
+promos AS (
+  SELECT
+    DISTINCT
+    promos.snapshot_date,
+    promos.partner_id,
+    promos.remote_product_id
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.AAA_pivot_promos` promos
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    aaa.partner_id = promos.partner_id AND promos.snapshot_date = aaa.snapshot_date
+  WHERE
+    promos.snapshot_date BETWEEN date_from AND date_to
+),
+
+
+daily_pop AS
+(
+ SELECT
+  snapshot_date,
+  partner_id,
+  COUNT(DISTINCT remote_product_id) as products_in_seasonal,
+  COUNT(DISTINCT CASE WHEN product_is_active THEN remote_product_id END) as products_in_seasonal_active,
+  COUNT(DISTINCT CASE WHEN product_is_active AND in_promo THEN remote_product_id END) as products_in_seasonal_active_in_promo,
+  ROUND(SUM(CASE WHEN product_is_active THEN product_popularity_in_partner END),4) as seasonal_popularity_in_partner,
+  ROUND(SUM(CASE WHEN product_is_active AND in_promo THEN product_popularity_in_partner END),4) as seasonal_popularity_in_partner_in_promo,
+  --SUM(CASE WHEN product_is_active THEN product_popularity_in_L2 END) as seasonal_popularity_in_L2,
+  FROM
+  (SELECT
+  dvps.snapshot_date,
+  aaa.partner_id,
+  dvps.remote_product_id,
+  product_name,
+  parent_category_name,
+  -- category_name,
+  product_is_active,
+  pop.product_popularity_in_partner,
+  pop.product_popularity_in_L2,
+  CASE WHEN promos.remote_product_id IS NOT NULL THEN TRUE ELSE FALSE  END as in_promo
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps, UNNEST(parent_category_name) parent_category_name
+INNER JOIN
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+ON
+  aaa.partner_id = dvps.remote_vendor_id AND dvps.snapshot_date = aaa.snapshot_date
+LEFT JOIN
+  pop 
+ON
+  pop.partner_id = dvps.remote_vendor_id AND pop.product_id = dvps.remote_product_id
+LEFT JOIN
+  promos
+ON
+  promos.partner_id = dvps.remote_vendor_id AND promos.remote_product_id = dvps.remote_product_id AND promos.snapshot_date = dvps.snapshot_date
+WHERE
+  dvps.snapshot_date BETWEEN '2025-02-27' AND '2025-03-05'
+--AND
+  --partner_name LIKE '%Hiper Olivos%'
+--AND
+  --franchise = 'Carrefour-AR'
+-- AND
+--   aaa.partner_id = 346155
+AND
+  parent_category_name = seasonal_category
+)
+--AND
+--  remote_product_id = 133692511
+GROUP BY
+  ALL
+)
+
+SELECT
+  *
+FROM
+  daily_pop
