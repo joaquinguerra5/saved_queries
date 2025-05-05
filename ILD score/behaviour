@@ -1,0 +1,53 @@
+DECLARE date_from DATE DEFAULT '2025-04-01';
+DECLARE date_to DATE DEFAULT '2025-04-30';
+
+WITH product_orders AS
+(
+SELECT
+  us.user_segment,
+  aaa.franchise,
+  dvp.sku,
+  dvp.barcodes,
+  dvp.product_name,
+  dvp.master_category_names.level_one,
+  dvp.master_category_names.level_two,
+  dvp.master_category_names.level_three,
+  COUNT(DISTINCT fo.order_id) as cant_orders,
+  SUM(d.total) as gfv
+FROM
+  `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+INNER JOIN  
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+ON
+  aaa.partner_id = fo.restaurant.id AND aaa.snapshot_date = fo.registered_date
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+ON
+  dvp.remote_vendor_id = fo.restaurant.id AND dvp.remote_product_id = d.product.product_id
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.fact_user_segmentation_snapshot` us
+ON
+  us.user_id = fo.user.id AND DATE_TRUNC(us.snapshot_date,MONTH) = DATE_TRUNC(fo.registered_date,MONTH)
+WHERE
+   fo.registered_date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH) AND CURRENT_DATE()
+-- AND
+--   aaa.franchise = @FRANCHISE
+-- AND
+--   lower(user_segment) IN ('new','prospect')
+AND
+  us.snapshot_date BETWEEN date_from AND date_to
+AND
+  sku IS NOT NULL
+GROUP BY
+  ALL
+
+)
+
+SELECT
+  *
+FROM
+  product_orders
+WHERE
+  lower(franchise) = 'carrefour-ar'
+ORDER BY
+  cant_orders DESC
