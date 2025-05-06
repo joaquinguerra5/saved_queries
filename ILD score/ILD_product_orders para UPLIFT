@@ -1,0 +1,107 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.aaa_ILD_product_orders`
+
+PARTITION BY snapshot_date
+
+CLUSTER BY partner_id, product_id, franchise, sku
+
+AS
+
+WITH prods AS (
+  SELECT
+    dvps.snapshot_date,
+    EXTRACT(DAYOFWEEK FROM dvps.snapshot_date) as dayofweek,
+    dvps.remote_vendor_id as partner_id,
+    aaa.cc,
+    aaa.partner_name,
+    aaa.franchise,
+    dvps.remote_product_id as product_id,
+    dvps.sku,
+    dvps.product_name,
+    dvps.master_category_names.level_one,
+    dvps.master_category_names.level_two,
+    dvps.product_is_active
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    aaa.partner_id = dvps.remote_vendor_id AND dvps.snapshot_date = aaa.snapshot_date
+  WHERE
+    dvps.snapshot_date >= DATE_SUB(CURRENT_DATE(),INTERVAL 3 MONTH)
+  --AND
+  --  product_is_active
+),
+
+partner_orders AS (
+  SELECT   
+    fo.registered_date,
+    fo.restaurant.id as partner_id,
+    COUNT(DISTINCT fo.order_id) as orders_partner,
+  FROM
+    `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    aaa.partner_id = fo.restaurant.id AND fo.registered_date = aaa.snapshot_date
+  WHERE
+    order_status = 'CONFIRMED'
+  AND
+    fo.registered_date >= DATE_SUB(CURRENT_DATE(),INTERVAL 3 MONTH)
+  GROUP BY
+    ALL
+),
+
+  product_orders AS  
+(
+  SELECT   
+    fo.registered_date,
+    fo.restaurant.id as partner_id,
+    d.product.product_id,
+    COUNT(DISTINCT fo.order_id) as orders_product,
+  FROM
+    `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    aaa.partner_id = fo.restaurant.id AND fo.registered_date = aaa.snapshot_date
+  WHERE
+    order_status = 'CONFIRMED'
+  AND
+    fo.registered_date >= DATE_SUB(CURRENT_DATE(),INTERVAL 3 MONTH)
+  GROUP BY
+    ALL
+),
+
+
+summary AS 
+(SELECT
+  p.*,
+  COALESCE(po.orders_product,0) as orders_product,
+  COALESCE(pao.orders_partner,0) as orders_partner,
+  CASE
+    WHEN promos.snapshot_date is not null THEN TRUE
+    ELSE FALSE
+  END as in_promo,
+  COALESCE(item_discount_percentage,0) as item_discount_percentage,
+FROM
+  prods p
+LEFT JOIN
+  product_orders po
+ON
+  po.registered_date = p.snapshot_date AND po.partner_id = p.partner_id AND po.product_id = p.product_id
+LEFT JOIN 
+  partner_orders pao
+ON
+  pao.registered_date = p.snapshot_date AND pao.partner_id = p.partner_id
+LEFT JOIN
+  (SELECT snapshot_date,partner_id,remote_product_id,product_is_active, AVG(item_discount_percentage) as item_discount_percentage FROM `peya-food-and-groceries.automated_tables_reports.AAA_pivot_promos` GROUP BY ALL) promos
+ON
+  promos.partner_id = p.partner_id AND p.product_id = promos.remote_product_id AND promos.snapshot_date = p.snapshot_date
+)
+
+SELECT
+  *
+FROM
+  summary
+WHERE
+  (product_is_active OR COALESCE(orders_product,0) > 0)

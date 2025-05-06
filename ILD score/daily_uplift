@@ -1,0 +1,37 @@
+WITH day_uplift AS
+(
+SELECT
+  partner_id,
+  franchise,
+  sku,
+  product_name,
+  dayofweek,
+  AVG(item_discount_percentage) as avg_item_discount_percentage,
+  SUM(CASE WHEN in_promo THEN orders_product END) as orders_product_in_promo,
+  SUM(CASE WHEN in_promo THEN orders_partner END)  as orders_partner_in_promo,
+  SAFE_DIVIDE(SUM(CASE WHEN in_promo THEN orders_product END),SUM(CASE WHEN in_promo THEN orders_partner END)) as incidence_in_promo,
+  SUM(CASE WHEN not in_promo THEN orders_product END) as orders_product_not_promo,
+  SUM(CASE WHEN not in_promo THEN orders_partner END)  as orders_partner_not_promo,
+  SAFE_DIVIDE(SUM(CASE WHEN not in_promo THEN orders_product END),SUM(CASE WHEN not in_promo THEN orders_partner END)) as incidence_not_promo,
+  SAFE_DIVIDE(SAFE_DIVIDE(SUM(CASE WHEN in_promo THEN orders_product END),SUM(CASE WHEN in_promo THEN orders_partner END)),SAFE_DIVIDE(SUM(CASE WHEN not in_promo THEN orders_product END),SUM(CASE WHEN not in_promo THEN orders_partner END))) -1 AS uplift_promos
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_ILD_product_orders`
+WHERE
+  lower(franchise) LIKE '%carrefour-ar%'
+GROUP BY
+  ALL
+HAVING
+  orders_partner_not_promo > 0 AND orders_partner_in_promo > 0
+)
+
+SELECT
+  franchise,
+  sku,
+  product_name,
+  AVG(avg_item_discount_percentage) as avg_item_discount_percentage,
+  SUM(orders_product_in_promo+orders_product_not_promo) as orders_product,
+  AVG(COALESCE(uplift_promos,0)) as uplift,
+FROM
+  day_uplift
+GROUP BY
+  ALL
