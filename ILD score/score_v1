@@ -1,0 +1,101 @@
+DECLARE date_from DATE DEFAULT DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH);
+DECLARE date_to DATE DEFAULT LAST_DAY(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH);
+
+--- PRODUCTOS
+WITH products AS (
+  SELECT
+    DISTINCT
+    aaa.cc,
+    aaa.franchise,
+    dvp.sku,
+    dvp.barcodes,
+    dvp.master_category_names.level_one,
+    dvp.master_category_names.level_two,
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+  INNER JOIN
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    aaa.partner_id = dvp.remote_vendor_id AND aaa.snapshot_date = date_to
+),
+
+
+--- UPLIFT
+daily_uplift AS
+(
+SELECT
+  partner_id,
+  franchise,
+  sku,
+  product_name,
+  dayofweek,
+  AVG(item_discount_percentage) as avg_item_discount_percentage,
+  SUM(CASE WHEN in_promo THEN orders_product END) as orders_product_in_promo,
+  SUM(CASE WHEN in_promo THEN orders_partner END)  as orders_partner_in_promo,
+  SAFE_DIVIDE(SUM(CASE WHEN in_promo THEN orders_product END),SUM(CASE WHEN in_promo THEN orders_partner END)) as incidence_in_promo,
+  SUM(CASE WHEN not in_promo THEN orders_product END) as orders_product_not_promo,
+  SUM(CASE WHEN not in_promo THEN orders_partner END)  as orders_partner_not_promo,
+  SAFE_DIVIDE(SUM(CASE WHEN not in_promo THEN orders_product END),SUM(CASE WHEN not in_promo THEN orders_partner END)) as incidence_not_promo,
+  CASE
+    WHEN 
+      SAFE_DIVIDE(SUM(CASE WHEN in_promo THEN orders_product END),SUM(CASE WHEN in_promo THEN orders_partner END)) = 0 AND SAFE_DIVIDE(SUM(CASE WHEN not in_promo THEN orders_product END),SUM(CASE WHEN not in_promo THEN orders_partner END)) > 0 THEN -1
+    WHEN SAFE_DIVIDE(SUM(CASE WHEN in_promo THEN orders_product END),SUM(CASE WHEN in_promo THEN orders_partner END)) > 0 AND SAFE_DIVIDE(SUM(CASE WHEN not in_promo THEN orders_product END),SUM(CASE WHEN not in_promo THEN orders_partner END)) = 0 THEN 1
+    ELSE
+  SAFE_DIVIDE(SAFE_DIVIDE(SUM(CASE WHEN in_promo THEN orders_product END),SUM(CASE WHEN in_promo THEN orders_partner END)),SAFE_DIVIDE(SUM(CASE WHEN not in_promo THEN orders_product END),SUM(CASE WHEN not in_promo THEN orders_partner END))) -1
+  END AS uplift_promos
+FROM
+  `peya-food-and-groceries.automated_tables_reports.aaa_ILD_product_orders`
+WHERE
+--   lower(franchise) LIKE '%libertad%'
+-- AND
+  snapshot_date BETWEEN date_from AND date_to
+GROUP BY
+  ALL
+HAVING
+  orders_partner_not_promo > 0 AND COALESCE(orders_partner_in_promo,0) > 0 AND (orders_product_not_promo > 0 OR orders_product_in_promo > 0)
+),
+
+-- SELECT
+--   *
+-- FROM
+--   daily_uplift
+-- WHERE
+--   sku= 
+--   '497177'
+
+
+uplift AS 
+(SELECT
+  franchise,
+  sku,
+  product_name,
+  AVG(avg_item_discount_percentage) as avg_item_discount_percentage,
+  SUM(orders_product_in_promo+orders_product_not_promo) as orders_product,
+  AVG(COALESCE(uplift_promos,0)) as uplift,
+  SUM(CASE WHEN COALESCE(uplift_promos,0) > 0 THEN 1 ELSE 0 END) as uplift_positivo,
+  COUNT(sku) as cant_lineas,
+  SAFE_DIVIDE(SUM(CASE WHEN COALESCE(uplift_promos,0) > 0 THEN 1 ELSE 0 END),COUNT(sku)) as uplift_pos_pct,
+  log(COUNT(sku)) as log_cant_lineas
+FROM
+  daily_uplift
+GROUP BY
+  ALL)
+----
+
+
+
+
+SELECT
+  *,
+  uplift*uplift_pos_pct*log_cant_lineas as uplift_score,
+  10*(SAFE_DIVIDE((uplift*uplift_pos_pct*log_cant_lineas)*MIN(uplift*uplift_pos_pct*log_cant_lineas) OVER(PARTITION BY p.franchise),MIN(uplift*uplift_pos_pct*log_cant_lineas) OVER(PARTITION BY p.franchise)*MAX(uplift*uplift_pos_pct*log_cant_lineas) OVER(PARTITION BY p.franchise))) as scaled_uplift_score
+FROM
+  products p
+LEFT JOIN
+  uplift u
+ON
+  p.franchise = u.franchise AND p.sku = u.sku
+WHERE
+  lower(p.franchise) like '%wong%'
+ORDER BY
+  uplift_score DESC
