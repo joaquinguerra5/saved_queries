@@ -1,0 +1,97 @@
+DECLARE date_from DATE DEFAULT '2023-01-01';
+DECLARE date_to DATE DEFAULT CURRENT_DATE();
+
+with 
+
+wot_data AS (
+  SELECT 
+    h.yyyymmdd AS registered_date,
+    h.restaurant_id AS partner_id,
+    ot.hour,
+    IFNULL(max(ot.open_time),0)/60 AS scheduled_time,
+    (IFNULL(max(ot.open_time),0)-IFNULL(SUM(ct.close_time),0))/60 AS open_time
+  FROM `peya-bi-tools-pro.il_core.fact_partner_open_time_hours` AS ot
+    LEFT JOIN `peya-bi-tools-pro.il_core.fact_partner_close_time_hours` AS ct 
+      ON ot.partner_id = ct.partner_id 
+      AND ot.schedule_date = ct.date 
+      AND ot.hour = ct.hour 
+    INNER JOIN `peya-bi-tools-pro.il_core.dim_historical_partners` h 
+      ON h.restaurant_id = ot.partner_id 
+      AND ot.schedule_date = h.yyyymmdd
+    LEFT JOIN `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+      ON h.restaurant_id = aaa.partner_id
+      and h.yyyymmdd = aaa.snapshot_date
+    LEFT JOIN
+      `peya-bi-tools-pro.il_core.dim_partner` dp
+    ON
+      dp.partner_id = ot.partner_id
+  WHERE ot.schedule_date BETWEEN date_from AND date_to
+    AND h.restaurant_state_name NOT IN ("CLOSED", "DELETED")
+    AND (aaa.partner_id IS NOT NULL OR dp.is_darkstore)
+    AND lower(dp.business_type.business_type_name) = 'market'
+    AND lower(dp.business_type.business_type_description) = 'groceries'
+    AND lower(businessCategory.name) IN ('conveniencia','minimarkets','supermercados')
+  GROUP BY ALL
+),
+
+
+ot as
+(SELECT
+  registered_date,
+  partner_id, 
+  SUM(open_time) as open_time
+FROM
+  wot_data
+GROUP BY
+  ALL),
+
+
+
+competitors AS
+(
+SELECT
+  aaa.*,
+  b.partner_id as competitor_partner_id,
+  b.partner_name as competitor_partner_name,
+  b.type as competitor_type,
+  SAFE_DIVIDE(
+    ST_AREA(ST_INTERSECTION(aaa.shape, b.shape)),
+    ST_AREA(aaa.shape)
+  ) AS porcentaje_interseccion
+FROM
+  `peya-food-and-groceries.automated_tables_reports.temp_aaa_shapes_daily` aaa
+LEFT JOIN 
+  `peya-food-and-groceries.automated_tables_reports.temp_aaa_shapes_daily` b
+ON
+  aaa.day = b.day AND ST_INTERSECTS(aaa.shape, b.shape) AND aaa.partner_id != b.partner_id
+WHERE
+  aaa.day BETWEEN '2025-01-01' AND '2025-01-31'
+),
+
+competitors_summary AS 
+(
+SELECT
+  competitors.*,
+  ot.open_time
+FROM
+  competitors
+LEFT JOIN
+  ot
+ON 
+  competitors.competitor_partner_id = SAFE_CAST(ot.partner_id AS STRING) AND ot.registered_date = competitors.day
+WHERE
+  competitors.partner_id = '309673'
+)
+
+
+SELECT
+  day,
+  partner_id,
+  partner_name,
+  city_name,
+  ROUND(SUM(CASE WHEN competitor_type = 'is_dmart' THEN (COALESCE(GREATEST(open_time,0),0)*COALESCE(porcentaje_interseccion,0)) END),2) as dmart_competition,
+  ROUND(SUM(CASE WHEN competitor_type = 'is_aaa' THEN (COALESCE(GREATEST(open_time,0),0)*COALESCE(porcentaje_interseccion,0)) END),2) as aaa_competition,
+FROM
+  competitors_summary
+GROUP BY
+  ALL

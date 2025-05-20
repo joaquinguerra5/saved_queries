@@ -1,0 +1,68 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.temp_aaa_shapes_daily` 
+
+PARTITION BY day
+
+CLUSTER BY
+  partner_id
+
+AS
+
+WITH polygons AS
+(SELECT 
+        day,
+        dp.country.country_id,
+        dp.country.country_name,
+        dal.city_name,
+        dal.city_id,
+        vendor_code as partner_id,
+        dp.partner_name,
+        CASE
+          WHEN aaa.partner_id IS NOT NULL THEN 'is_aaa'
+          WHEN dp.is_darkstore THEN 'is_dmart'
+          ELSE 'revisar'
+        END
+          as type,
+        dp.business_type.business_type_name,
+        history.is_active,
+        ST_UNION_AGG(s.shape) as shape, 
+
+    FROM `peya-data-origins-pro.cl_hurrier.vendors_delivery_areas` b,
+    UNNEST(delivery_areas) da
+    LEFT JOIN UNNEST(delivery_areas_location) dal
+    LEFT JOIN UNNEST(da.history) history,
+    UNNEST(GENERATE_DATE_ARRAY(DATE(history.active_from),COALESCE(DATE(history.active_to),CURRENT_DATE()))) day
+    
+    LEFT JOIN `peya-data-origins-pro.cl_hurrier.vendor_delivery_area_shapes` s
+    ON s.id = da.id
+    AND da.shape_hash = s.shape_hash
+
+    LEFT JOIN `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+    ON
+      SAFE_CAST(aaa.partner_id AS STRING) = b.vendor_code AND aaa.snapshot_date = day
+
+    LEFT JOIN
+      `peya-bi-tools-pro.il_core.dim_partner` dp
+    ON
+      SAFE_CAST(dp.partner_id AS STRING) = b.vendor_code  
+    
+    WHERE vertical_type NOT IN ('coffee', 'courier_business', 'coffee', 'restaurants')
+    AND DATE(history.active_from)<>IFNULL(DATE(history.active_to),CURRENT_DATE()-1)
+    AND da.shape_hash IS NOT NULL
+    AND history.is_active IS TRUE
+    AND s.created_date>="2022-01-01"
+    AND (aaa.partner_id IS NOT NULL OR dp.is_darkstore)
+    AND lower(dp.business_type.business_type_name) = 'market'
+    AND lower(dp.business_type.business_type_description) = 'groceries'
+    AND lower(businessCategory.name) IN ('conveniencia','minimarkets','supermercados')
+    -- AND
+    --   vendor_code = '329470'
+    AND day BETWEEN '2024-01-01' AND CURRENT_DATE()
+    GROUP BY ALL
+)
+
+
+SELECT
+  *,
+  ST_AREA(shape) area_size
+FROM
+  polygons

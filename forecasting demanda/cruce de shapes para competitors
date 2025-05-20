@@ -1,0 +1,29 @@
+with test AS
+(
+SELECT
+  aaa.*,
+  b.partner_id as competitor_partner_id,
+  b.partner_name as competitor_partner_name,
+  b.type as competitor_type,
+  SAFE_DIVIDE(
+    ST_AREA(ST_INTERSECTION(aaa.shape, b.shape)),
+    ST_AREA(aaa.shape)
+  ) AS porcentaje_interseccion
+
+FROM
+  `peya-food-and-groceries.automated_tables_reports.temp_aaa_shapes_daily` aaa
+LEFT JOIN 
+  `peya-food-and-groceries.automated_tables_reports.temp_aaa_shapes_daily` b
+ON
+  aaa.day = b.day AND ST_INTERSECTS(aaa.shape, b.shape) AND aaa.partner_id != b.partner_id
+WHERE
+  aaa.day = '2025-01-07'
+)
+
+SELECT
+  *,
+  porcentaje_interseccion
+FROM
+  test
+WHERE
+  partner_id = '309673'
