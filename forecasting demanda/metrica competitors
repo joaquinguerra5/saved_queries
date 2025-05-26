@@ -1,5 +1,13 @@
-DECLARE date_from DATE DEFAULT '2023-01-01';
+DECLARE date_from DATE DEFAULT '2024-01-01';
 DECLARE date_to DATE DEFAULT CURRENT_DATE();
+
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.aaa_demand_forecasting_competitors`
+
+PARTITION BY day
+
+CLUSTER BY partner_id
+
+AS
 
 with 
 
@@ -65,7 +73,7 @@ LEFT JOIN
 ON
   aaa.day = b.day AND ST_INTERSECTS(aaa.shape, b.shape) AND aaa.partner_id != b.partner_id
 WHERE
-  aaa.day BETWEEN '2025-01-01' AND '2025-01-31'
+  aaa.day BETWEEN date_from AND date_to
 ),
 
 competitors_summary AS 
@@ -79,8 +87,8 @@ LEFT JOIN
   ot
 ON 
   competitors.competitor_partner_id = SAFE_CAST(ot.partner_id AS STRING) AND ot.registered_date = competitors.day
-WHERE
-  competitors.partner_id = '309673'
+-- WHERE
+--   competitors.partner_id = '309673'
 )
 
 

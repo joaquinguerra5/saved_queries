@@ -14,6 +14,7 @@ DECLARE date_to DATE DEFAULT CURRENT_DATE();
 WITH partners AS (
   SELECT
     partner_id,
+    cc,
     MIN(snapshot_date) as min_snapshot_date,
     MAX(snapshot_date) as max_snapshot_date
   FROM
@@ -24,15 +25,59 @@ WITH partners AS (
     ALL
 ),
 
+
 partner_dates AS (
   SELECT
     partner_id,
-    day
+    day,
+    SUM(CASE WHEN day = sd.date THEN 1 ELSE 0 END) as is_special_date,
+    MAX(CASE WHEN day = sd.date THEN sd.date_type ELSE '-' END) as special_date_type,
+    MIN(ABS(DATE_DIFF(CASE WHEN sd.date_type = 'high_commercial_activity' THEN sd.date END,day,DAY))) distance_high_comercial_date,
+    MIN(ABS(DATE_DIFF(CASE WHEN sd.date_type = 'low_commercial_activity' THEN sd.date END,day,DAY))) distance_low_comercial_date,
   FROM
     partners,
     UNNEST(GENERATE_DATE_ARRAY(min_snapshot_date,max_snapshot_date)) day
+  LEFT JOIN
+    `peya-food-and-groceries.automated_tables_reports.gsheet_aaa_special_dates` sd
+  ON
+    sd.country_code = partners.cc
+  GROUP BY
+    1,2
 )
 ,
+
+assortment AS (
+  SELECT
+    snapshot_date,
+    partner_id,
+    COUNT(DISTINCT CASE WHEN product_is_active THEN sku ELSE NULL END) as active_products
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  INNER JOIN
+    partners p
+  ON
+    p.partner_id = dvps.remote_vendor_id
+  WHERE
+    snapshot_date BETWEEN date_from AND date_to
+  GROUP BY
+    ALL
+),
+
+promos AS (
+  SELECT  
+    pr.registered_date,
+    pr.partner_id,
+    pr.avg_productos_promo_active,
+    pr.ppp_weighted
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.aaa_promo_fundamentals_daily` pr
+  INNER JOIN
+    partners p
+  ON
+    p.partner_id = pr.partner_id
+  WHERE
+    registered_date BETWEEN date_from AND date_to
+),
 
 items_ordered AS (
 	SELECT
@@ -58,16 +103,27 @@ SELECT
   EXTRACT(ISOWEEK FROM pd.day) as isoweek,
   EXTRACT(month FROM pd.day) as month,
   EXTRACT(year FROM pd.day) as year,
+  pd.is_special_date,
+  pd.special_date_type,
+  pd.distance_high_comercial_date,
+  pd.distance_low_comercial_date,
   pd.partner_id,
   aaa.franchise,
   aaa.clasificacion,
   dhp.shopper_type_id,
   dp.country.country_code,
   dp.city.id as city_id,
+  COALESCE(DATE_DIFF(pd.day,dp.first_date_online,DAY),0) as days_online,
   COALESCE(COUNT(DISTINCT order_id),0) as order_count,
   COALESCE(ANY_VALUE(qty_ordered),0) as items_ordered,
   COALESCE(ANY_VALUE(COALESCE(GREATEST(availability.ot,0),0)),0) as open_time,
   COALESCE(ANY_VALUE(COALESCE(GREATEST(availability.weighted_open_hours,0),0)),0) as weighted_open_hours,
+  COALESCE(ass.active_products,0) as active_products,
+  COALESCE(pr.avg_productos_promo_active,0) as avg_productos_promo_active,
+  COALESCE(pr.ppp_weighted,0) as ppp_weighted,
+  COALESCE(comp.dmart_competition,0) as dmart_competition,
+  COALESCE(comp.aaa_competition,0) as aaa_competition,
+  COALESCE(area_size,0) as area_size
 FROM
   partner_dates pd
 LEFT JOIN
@@ -94,11 +150,28 @@ LEFT JOIN
   `peya-food-and-groceries.automated_tables_reports.aaa_availability_v4` availability
 ON
   availability.partner_id = pd.partner_id AND availability.registered_date = pd.day
+ LEFT JOIN
+   assortment ass
+ ON
+  ass.partner_id = pd.partner_id AND ass.snapshot_date = pd.day
+LEFT JOIN
+  promos pr
+ON
+  pr.partner_id = pd.partner_id AND pr.registered_date = pd.day
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.aaa_demand_forecasting_competitors` comp
+ON
+  comp.partner_id = SAFE_CAST(pd.partner_id AS STRING) AND comp.day = pd.day
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.aaa_demand_forecasting_coverage` cov
+ON
+  cov.partner_id = SAFE_CAST(pd.partner_id AS STRING) AND cov.day = pd.day
 WHERE
   pd.day BETWEEN date_from AND date_to
---AND
-  --aaa.partner_id = 329470
+
 -- AND
---   day = '2025-01-01'
+--   aaa.partner_id = 329470
+-- AND
+--   pd.day = '2025-01-07'
 GROUP BY
   ALL

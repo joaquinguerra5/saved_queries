@@ -1,0 +1,246 @@
+DECLARE
+  date_from DATE DEFAULT DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 13 MONTH),MONTH);
+DECLARE
+  date_to DATE DEFAULT CURRENT_DATE(); 
+
+
+-- INSERT INTO
+--   `peya-food-and-groceries.automated_tables_reports.aaa_promo_fundamentals_daily`
+
+
+CREATE OR REPLACE TABLE
+  `peya-food-and-groceries.automated_tables_reports.aaa_promo_fundamentals_daily`
+PARTITION BY
+  registered_date
+CLUSTER BY
+  cc,
+  franchise,
+  partner_id,
+  clasificacion AS
+
+WITH
+  partners AS (
+  SELECT
+    snapshot_date,
+    franchise,
+    cc,
+    clasificacion,
+    partner_id,
+    partner_name
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot`
+  WHERE
+    snapshot_date BETWEEN date_from
+    AND date_to )
+    
+  
+  ,ppp AS (
+  SELECT
+    snapshot_date,
+    partner_id,
+    ROUND(COALESCE(daily_ppp_weighted,0),3) AS ppp_weighted
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.aaa_weighted_ppp_daily`
+  WHERE
+    snapshot_date BETWEEN date_from
+    AND date_to
+  GROUP BY
+    ALL )
+
+  ,top_prods AS (
+  SELECT
+    month,
+    franchise,
+    clasificacion,
+    sku,
+    ILD_score_ranking
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.aaa_ILD_score` ILD
+  WHERE
+    ILD_score_ranking <= 500
+    AND user_segment = 'ALL'
+    AND gender_merged = 'ALL' )
+  
+  ,datos_diarios AS (
+  SELECT
+    pa.snapshot_date,
+    pa.cc,
+    pa.franchise,
+    pa.clasificacion,
+    pa.partner_id,
+    COUNT(DISTINCT remote_product_id) AS productos_promo,
+    count (DISTINCT
+      CASE
+        WHEN (product_is_active OR orders > 0) THEN remote_product_id
+        ELSE NULL
+    END
+      ) AS productos_promo_active,
+    count (DISTINCT
+      CASE
+        WHEN confirmed_orders > 0 THEN remote_product_id
+        ELSE NULL
+    END
+      ) AS productos_promo_active_orders,
+    avg (CASE
+        WHEN product_is_active = TRUE AND item_discount_percentage > 0 THEN item_discount_percentage
+        ELSE NULL
+    END
+      ) avg_item_discount_percentage_active,
+    count (DISTINCT
+      CASE
+        WHEN (product_is_active OR orders > 0) = TRUE AND incentive_type = "composite" THEN remote_product_id
+        ELSE NULL
+    END
+      ) AS productos_promo_active_composite,
+    count (DISTINCT
+      CASE
+        WHEN (product_is_active OR orders > 0) = TRUE AND incentive_type != "composite" THEN remote_product_id
+        ELSE NULL
+    END
+      ) AS productos_promo_active_volumetricos,
+    COUNT(DISTINCT
+      CASE
+        WHEN tp.sku IS NOT NULL AND tp.ILD_score_ranking <=50 AND (product_is_active OR orders > 0) THEN tp.sku
+    END
+      ) AS top_50_in_promo,
+    COUNT(DISTINCT
+      CASE
+        WHEN tp.sku IS NOT NULL AND tp.ILD_score_ranking <=100 AND (product_is_active OR orders > 0) THEN tp.sku
+    END
+      ) AS top_100_in_promo,
+    COUNT(DISTINCT
+      CASE
+        WHEN tp.sku IS NOT NULL AND tp.ILD_score_ranking <=500 AND (product_is_active OR orders > 0) THEN tp.sku
+    END
+      ) AS top_500_in_promo
+  FROM
+    partners pa
+  LEFT JOIN
+    `peya-food-and-groceries.automated_tables_reports.AAA_pivot_promos` AS p
+  ON
+    p.partner_id = pa.partner_id AND p.snapshot_date = pa.snapshot_date
+  LEFT JOIN
+    top_prods tp
+  ON
+    tp.franchise = pa.franchise
+    AND tp.sku = p.sku
+    AND tp.clasificacion = p.clasificacion
+    AND tp.month = LAST_DAY(DATE_SUB(p.snapshot_date,INTERVAL 1 MONTH),MONTH)
+  WHERE
+    pa.snapshot_date BETWEEN date_from AND date_to
+  GROUP BY
+    ALL)
+
+
+  ,vfd_gmv AS (
+  SELECT
+    registered_date,
+    p.* EXCEPT(snapshot_date),
+    safe_divide (SUM(VFD),
+      sum (gmv_gross)) AS VFD_gmv,
+    sum (VFD) AS vfd,
+    sum (gmv_gross) AS gmv_gross,
+    SUM(confirmed_orders) AS confirmed_orders,
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.qc_AAA_order` o
+  INNER JOIN
+    partners p
+  ON
+    p.partner_id = o.partner_id
+    AND o.registered_date = p.snapshot_date
+  WHERE
+    order_status = "CONFIRMED"
+    AND registered_date BETWEEN date_from
+    AND date_to
+  GROUP BY
+    ALL )
+
+  ,cfd_tfd AS (
+  SELECT
+    registered_date,
+    partner_id,
+    sum (CFD_Promo) AS CFD_Promo,
+    sum (TPFD_Promo) AS TFD_Promo
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.cfd_tfd_promos_aaa`
+  WHERE
+    registered_date BETWEEN date_from
+    AND date_to
+  GROUP BY
+    ALL
+  ORDER BY
+    1,
+    3,
+    2 )
+
+  ,gpv_gmv_aux AS (
+  SELECT
+    registered_date,
+    partner_id,
+    SUM(gpv.gpv_promo_EU) AS gpv_promo,
+    SUM(gpv.gpv_total_EU) AS gpv_total,
+    SAFE_DIVIDE(SUM(gpv.gpv_promo_EU),SUM(gpv.gpv_total_EU)) AS gpv_promo_penetration
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.aaa_promo_gpv_contribution` gpv
+  WHERE
+    registered_date BETWEEN date_from
+    AND date_to
+  GROUP BY
+    ALL ) --,
+
+
+SELECT
+  vfd_gmv.registered_date,
+  vfd_gmv.cc,
+  vfd_gmv.franchise,
+  vfd_gmv.partner_id,
+  vfd_gmv.partner_name,
+  confirmed_orders,
+  vfd_gmv.clasificacion,
+  AVG(productos_promo) AS avg_productos_promo,
+  AVG(productos_promo_active) AS avg_productos_promo_active,
+  AVG(productos_promo_active_orders) AS avg_productos_promo_active_orders,
+  AVG(productos_promo_active_volumetricos) AS avg_productos_promo_active_volumetricos,
+  AVG(productos_promo_active_composite) AS productos_promo_active_composite,
+  safe_divide (AVG(productos_promo_active),
+    AVG(productos_promo)) AS percentage_avg_active_promo,
+  AVG(avg_item_discount_percentage_active) avg_percentage_discount,
+  datos_diarios.top_50_in_promo AS top_50_in_promo,
+  datos_diarios.top_100_in_promo AS top_100_in_promo,
+  datos_diarios.top_500_in_promo AS top_500_in_promo,
+  MAX(vfd_gmv.VFD_gmv) AS VFD_GMV,
+  MAX(gpv_promo_penetration) AS gpv_promo_penetration,
+  MAX(gmv_gross) AS gmv_gross,
+  MAX(vfd) AS vfd,
+  MAX(CFD_Promo) AS cfd,
+  MAX(TFD_Promo) AS tfd,
+  MAX(gpv_total) AS Subtotal_total,
+  MAX(gpv_promo) AS Subtotal_promo,
+  ppp.ppp_weighted
+FROM
+  vfd_gmv
+LEFT JOIN
+  datos_diarios
+ON
+  vfd_gmv.registered_date = datos_diarios.snapshot_date
+  AND vfd_gmv.partner_id = datos_diarios.partner_id
+LEFT JOIN
+  gpv_gmv_aux gpv_gmv
+ON
+  gpv_gmv.registered_date = vfd_gmv.registered_date
+  AND vfd_gmv.partner_id = gpv_gmv.partner_id
+LEFT JOIN
+  cfd_tfd
+ON
+  vfd_gmv.registered_date = cfd_tfd.registered_date
+  AND vfd_gmv.partner_id = cfd_tfd.partner_id
+LEFT JOIN
+  ppp
+ON
+  ppp.partner_id = vfd_gmv.partner_id
+  AND ppp.snapshot_date = vfd_gmv.registered_date 
+--WHERE
+  -- vfd_gmv.partner_id IN (329470,309673)
+GROUP BY
+  ALL
+  --order by 1,2,3

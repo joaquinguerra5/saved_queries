@@ -10,34 +10,29 @@ WITH MAUs as
 
 SELECT
 distinct
-M.month_date,
+ps.day,
 ps.partner_id,
 partner_name,
 ps.country_name,
 ps.city_name,
 ps.city_id,
+ps.area_size,
 count (distinct case when ST_WITHIN(customer_geogpoint,shape) = true then customer_id else null end) customers_cubiertos,
 
--- count (distinct case when ST_WITHIN(customer_geogpoint,shape) = true AND income="LOW" then customer_id else null end) customers_cubiertos_low,
--- count (distinct case when ST_WITHIN(customer_geogpoint,shape) = true AND income="MID-LOW" then customer_id else null end) customers_cubiertos_midlow,
--- count (distinct case when ST_WITHIN(customer_geogpoint,shape) = true AND income="MID" then customer_id else null end) customers_cubiertos_mid,
--- count (distinct case when ST_WITHIN(customer_geogpoint,shape) = true AND income="MID-HIGH" then customer_id else null end) customers_cubiertos_midhigh,
--- count (distinct case when ST_WITHIN(customer_geogpoint,shape) = true AND income="HIGH" then customer_id else null end) customers_cubiertos_high,
 
 
 
 FROM `peya-food-and-groceries.automated_tables_reports.temp_aaa_shapes_daily` ps
 
-INNER JOIN MAUs M
+LEFT JOIN MAUs M
 ON  M.country_id  = ps.country_id
 AND M.month_date  = DATE_TRUNC(DATE_SUB(ps.day,INTERVAL 1 MONTH),MONTH)
 AND UPPER(M.city_name_lz)=UPPER(ps.city_name)
 
-WHERE ps.day = '2025-01-03'
+WHERE ps.day >= '2025-01-03'
+AND
+  partner_id = '352841'
+
 
 group by all
 -- having count (distinct case when ST_WITHIN(customer_geogpoint,shape) = true then customer_id else null end)  > 0
-
-
-
-
