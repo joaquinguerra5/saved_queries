@@ -1,0 +1,184 @@
+DECLARE start_date DATE DEFAULT '2023-01-01';
+
+
+CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_qc_AAA_coverage_partner_shapes_PERU`
+
+
+PARTITION BY month_date
+AS
+
+
+WITH
+
+zone_name as
+(
+SELECT
+country.country_code,
+country_name,
+city.id as city_id_lz,
+city.name as city_name_lz,
+zones.id AS zone_id,
+zones.name AS zone_name,
+ST_Union_Agg(zones.shape) as WKT,
+
+
+FROM `peya-data-origins-pro.cl_hurrier.countries` AS country
+INNER JOIN UNNEST(cities) AS city
+INNER JOIN UNNEST(zones) AS zones
+INNER JOIN UNNEST(starting_points) AS sp
+WHERE lower(country.country_code)="pe" AND
+zones.name IS NOT NULL
+AND zones.is_active=TRUE
+
+
+GROUP BY ALL  
+),
+
+
+
+
+partners_AAA as
+(
+SELECT DISTINCT *
+FROM `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot`
+WHERE snapshot_date>=start_date
+AND
+    cc= 'PE'
+ORDER BY 1 desc
+),
+
+
+
+
+orders as
+(
+SELECT
+DATE_TRUNC(registered_date,month) as month_date,
+restaurant.id as partner_id,
+franchise,
+clasificacion,
+SUM(IF(order_Status="CONFIRMED",1,0)) as orders
+FROM `peya-bi-tools-pro.il_core.fact_orders`
+   
+INNER JOIN partners_AAA aaa
+ON aaa.partner_id=restaurant.id
+AND aaa.snapshot_date=registered_date
+   
+WHERE registered_date >= start_date
+GROUP BY ALL
+HAVING SUM(IF(order_Status="CONFIRMED",1,0))>0
+),
+
+
+
+
+shopper as
+(
+  SELECT yyyymmdd, restaurant_id,
+  FROM `peya-bi-tools-pro.il_core.dim_historical_partners`
+  WHERE shopper_type_id=2
+  AND is_darkstore IS FALSE
+  AND yyyymmdd>=start_date
+),
+
+
+area_per_partner AS (
+    SELECT
+        DATE_TRUNC(DATE(history.active_from),month) as active_from,
+        LAST_DAY(IFNULL(DATE(history.active_to),CURRENT_DATE()-1),month) as active_to,
+        entity_id,
+        dal.city_name,
+        dal.city_id,
+        vendor_code,
+        history.is_active,
+        ST_UNION_AGG(s.shape) as shape,
+
+
+    FROM `peya-data-origins-pro.cl_hurrier.vendors_delivery_areas` b,
+    UNNEST(delivery_areas) da
+    LEFT JOIN UNNEST(delivery_areas_location) dal
+    LEFT JOIN UNNEST(da.history) history
+   
+    LEFT JOIN `peya-data-origins-pro.cl_hurrier.vendor_delivery_area_shapes` s
+    ON s.id = da.id
+    AND da.shape_hash = s.shape_hash
+   
+    WHERE vertical_type NOT IN ('coffee', 'courier_business', 'coffee', 'restaurants')
+    AND DATE(history.active_from)<>IFNULL(DATE(history.active_to),CURRENT_DATE()-1)
+    AND da.shape_hash IS NOT NULL
+    AND history.is_active IS TRUE
+    AND created_date>="2022-01-01"
+    GROUP BY ALL
+    ),
+
+partner_shapes AS
+(
+    SELECT  
+        dim.yyyymmdd as month_date,
+        dim.country_id,
+            c.country_name,
+        c.country_code,
+        a.city_id as city_id_lz,
+        a.city_name as city_name_lz,
+        "AAA" as category_partner,
+        clasificacion,
+        dim.restaurant_id as partner_id,
+        restaurant_name as partner_name,
+        IF(sh.restaurant_id IS NOT NULL,1,0) as is_shopper,
+        franchise,
+        st_union_agg(shape) AS partner_shape
+
+
+    FROM `peya-bi-tools-pro.il_core.dim_historical_partners` AS dim
+   
+    LEFT JOIN `peya-data-origins-pro.cl_core.country` c
+    ON dim.country_id=c.country_id
+
+
+    INNER JOIN orders o
+    ON o.partner_id=restaurant_id
+    AND o.month_date=DATE(yyyymmdd)
+   
+    LEFT JOIN area_per_partner a
+    ON a.vendor_code = SAFE_CAST(dim.restaurant_id AS STRING)
+    AND yyyymmdd >= DATE(active_from)
+    AND yyyymmdd < IFNULL(DATE(active_to),CURRENT_DATE()-1)
+
+
+    LEFT JOIN shopper sh
+    ON sh.restaurant_id=dim.restaurant_id
+    AND sh.yyyymmdd=dim.yyyymmdd
+
+   
+    WHERE
+    (UPPER( dim.business_name) = UPPER('Drinks')
+    OR UPPER(dim.business_name) = UPPER('Kiosks')
+    OR UPPER(dim.business_name) = UPPER('Market')
+    OR UPPER(dim.business_name) = UPPER('Pets')
+    OR UPPER(dim.business_name) = UPPER('Pharmacy')
+    OR UPPER(dim.business_name) = UPPER('Shop'))
+   
+
+
+    AND dim.yyyymmdd >= DATE(start_date)
+    AND EXTRACT(DAY FROM DATE(dim.yyyymmdd))=1
+    AND (dim.country_id > 0 OR dim.country_id IS NULL)
+    AND (dim.restaurant_id > 0 OR dim.restaurant_id IS NULL)
+    AND dim.country_name = "Perú"
+
+
+    GROUP BY ALL)
+
+  SELECT
+    ps.*,
+    zn.zone_id,
+    zn.zone_name,
+    ST_INTERSECTION(zn.WKT, ps.partner_shape) AS poligono_partner_zona,
+    ST_AREA(ST_INTERSECTION(zn.WKT, ps.partner_shape)) as area_interseccion
+  FROM
+    partner_shapes ps
+  LEFT JOIN
+    zone_name zn
+  ON
+    ST_INTERSECTS(zn.WKT, ps.partner_shape)
+
