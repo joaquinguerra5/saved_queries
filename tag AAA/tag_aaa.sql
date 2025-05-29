@@ -1,27 +1,19 @@
 WITH  orders AS (
   SELECT
-  #dimensiones
-  DATE_TRUNC(orders.registered_date, MONTH) AS month,
-  -- case
-  -- When dim_partner.partner_name LIKE "AMPM%" AND dim_partner.country.country_code LIKE "CR" THEN "Ampm"
-  -- ELSE dim_partner__franchise.franchise_name END as franchise,
-  dim_partner__franchise.franchise_name as franchise,
-  dim_partner.business_type.business_type_name as business_type,
-  dim_partner.is_darkstore,
+  DISTINCT
+  dp.franchise.franchise_name as franchise,
+  dp.business_type.business_type_name as business_type,
+  dp.is_darkstore,
   partner_id,
   partner_name,
   orders.country.country_code AS country_code,
-  dim_partner__city.name  AS city,
+  dp.city.name  AS city,
   franchise.franchise_id
   FROM `peya-bi-tools-pro.il_core.fact_orders` AS orders
-  LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` AS dim_partner
-  ON  dim_partner.partner_id = orders.restaurant.id
-  LEFT JOIN  UNNEST([dim_partner.franchise]) AS dim_partner__franchise
-  LEFT JOIN UNNEST([dim_partner.city]) as dim_partner__city
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` AS dp
+  ON  dp.partner_id = orders.restaurant.id
   WHERE  orders.registered_date between "2023-01-01" and current_date()
-  AND upper(orders.business_type.business_type_name)  = 'MARKET'
---  AND dim_partner.partner_name LIKE '%Luvebras%'
-  GROUP BY 1,2,3,4,5,6,7,8,9
+  AND upper(dp.business_type.business_type_name)  = 'MARKET'
 ),
 
 
@@ -100,13 +92,12 @@ WHERE
 '001bO00000ERWv1QAH', -- LUVEBRAS
 '001bO00000ERVsWQAX', -- MIXTURA
 '001bO00000ERXW7QAP', -- VEA
-'001bO00000ERXZQQA5' -- FRESH MARKET
+'001bO00000ERXZQQA5', -- FRESH MARKET
+'001bO00000ER97QQAT'  -- TOTTUS NUEVA
 
 )
 
 )
-and orders.is_darkstore is false
-and orders.business_type = "Market"
 GROUP BY 1,2,3,4,5,6,7
 )
 SELECT
