@@ -16,6 +16,7 @@ INSERT INTO `peya-food-and-groceries.automated_tables_reports.aaa_ILD_score`
 WITH mov AS
 (SELECT
   aaa.franchise,
+  aaa.clasificacion,
   AVG(gmv.minimum_order_value) as avg_mov
 FROM
   `peya-datamarts-pro.dm_order_profitability.fact_order_profitability` prof
@@ -41,6 +42,7 @@ products AS (
     date_to as month,
     aaa.cc,
     aaa.franchise,
+    aaa.clasificacion,
     dvp.sku,
     dvp.barcodes,
     dvp.product_name,
@@ -67,8 +69,9 @@ products AS (
 daily_uplift AS
 (
 SELECT
-  partner_id,
+  po.partner_id,
   p.franchise,
+  p.clasificacion,
   p.sku,
   p.product_name,
   dayofweek,
@@ -88,10 +91,13 @@ SELECT
   END AS uplift_promos
 FROM
   `peya-food-and-groceries.automated_tables_reports.aaa_ILD_product_orders` po
-LEFT JOIN 
-  (SELECT DISTINCT franchise, sku, product_name FROM products) p
+INNER JOIN (SELECT partner_id,clasificacion FROM `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` WHERE snapshot_date = date_to) aaa
 ON
-  p.sku =  po.sku AND p.franchise = po.franchise
+  aaa.partner_id = po.partner_id
+LEFT JOIN 
+  (SELECT DISTINCT franchise,clasificacion, sku, product_name FROM products) p
+ON
+  p.sku =  po.sku AND p.franchise = po.franchise AND aaa.clasificacion = p.clasificacion
 WHERE
   snapshot_date BETWEEN date_from AND date_to
 GROUP BY
@@ -105,6 +111,7 @@ HAVING
 uplift_products AS 
 (SELECT
   franchise,
+  clasificacion,
   sku,
   product_name,
   AVG(avg_item_discount_percentage) as avg_item_discount_percentage,
@@ -124,6 +131,7 @@ GROUP BY
 uplift as
 (SELECT
   franchise,
+  clasificacion,
   sku,
   product_name,
   avg_item_discount_percentage,
@@ -148,6 +156,7 @@ SELECT
   us.user_segment,
   lower(ui.gender_merged) as gender_merged,
   aaa.franchise,
+  aaa.clasificacion,
   dvp.sku,
   dvp.barcodes,
   dvp.product_name,
@@ -236,7 +245,7 @@ union_segments AS (
 ranking_behaviour as 
 (SELECT
   *,
-  ROW_NUMBER() OVER(PARTITION BY user_segment,gender_merged, franchise ORDER BY cant_orders , gfv) as ranking_bh,
+  ROW_NUMBER() OVER(PARTITION BY user_segment,gender_merged, franchise, clasificacion ORDER BY cant_orders , gfv) as ranking_bh,
 FROM
   union_segments
 WHERE
@@ -250,8 +259,8 @@ behaviour AS
 (SELECT
   *,
   -- MIN(ranking_behaviour)
-  ROUND(10*(SAFE_DIVIDE(ranking_bh - MIN(ranking_bh) OVER(PARTITION BY user_segment,gender_merged, franchise),MAX(ranking_bh) OVER(PARTITION BY user_segment,gender_merged, franchise)-MIN(ranking_bh) OVER(PARTITION BY user_segment,gender_merged, franchise))),2) as scaled_behaviour_score_v1,
-  ROUND(10*(SAFE_DIVIDE(cant_orders - MIN(cant_orders) OVER(PARTITION BY user_segment,gender_merged, franchise),MAX(cant_orders) OVER(PARTITION BY user_segment,gender_merged, franchise)-MIN(cant_orders) OVER(PARTITION BY user_segment,gender_merged, franchise))),2) as scaled_behaviour_score,
+  ROUND(10*(SAFE_DIVIDE(ranking_bh - MIN(ranking_bh) OVER(PARTITION BY user_segment,gender_merged, franchise, clasificacion),MAX(ranking_bh) OVER(PARTITION BY user_segment,gender_merged, franchise, clasificacion)-MIN(ranking_bh) OVER(PARTITION BY user_segment,gender_merged, franchise, clasificacion))),2) as scaled_behaviour_score_v1,
+  ROUND(10*(SAFE_DIVIDE(cant_orders - MIN(cant_orders) OVER(PARTITION BY user_segment,gender_merged, franchise, clasificacion),MAX(cant_orders) OVER(PARTITION BY user_segment,gender_merged, franchise, clasificacion)-MIN(cant_orders) OVER(PARTITION BY user_segment,gender_merged, franchise, clasificacion))),2) as scaled_behaviour_score,
 FROM
   ranking_behaviour
 ),
@@ -263,6 +272,7 @@ product_pop_agg as
 (
 SELECT
   pop.franchise,
+  aaa.clasificacion,
   p.sku,
   p.product_name,
   COALESCE(SUM(clicks),0) as clicks,
@@ -270,12 +280,18 @@ SELECT
   COALESCE(SAFE_DIVIDE(SUM(orders),SUM(clicks)),0) as conversion,
 FROM
   `peya-food-and-groceries.automated_tables_reports.aaa_product_popularity` pop
+INNER JOIN
+  `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+ON
+  aaa.partner_id = pop.partner_id
 LEFT JOIN
   products p
 ON
   p.franchise = pop.franchise AND p.sku = pop.sku
 WHERE
   date BETWEEN date_from AND date_to
+AND
+  aaa.snapshot_date = date_to
 -- AND
 --   lower(franchise) LIKE '%carrefour-ar%'
 GROUP BY
@@ -285,8 +301,8 @@ GROUP BY
 scale_pop as 
 (SELECT
   p.*,
-  10*(SAFE_DIVIDE(clicks - MIN(clicks) OVER(PARTITION BY franchise),MAX(clicks) OVER(PARTITION BY franchise)-MIN(clicks) OVER(PARTITION BY franchise))) as clicks_scaled,
-  10*(SAFE_DIVIDE(conversion - MIN(conversion) OVER(PARTITION BY franchise),MAX(conversion) OVER(PARTITION BY franchise)-MIN(conversion) OVER(PARTITION BY franchise))) as conversion_scaled
+  10*(SAFE_DIVIDE(clicks - MIN(clicks) OVER(PARTITION BY franchise,clasificacion),MAX(clicks) OVER(PARTITION BY franchise,clasificacion)-MIN(clicks) OVER(PARTITION BY franchise,clasificacion))) as clicks_scaled,
+  10*(SAFE_DIVIDE(conversion - MIN(conversion) OVER(PARTITION BY franchise,clasificacion),MAX(conversion) OVER(PARTITION BY franchise,clasificacion)-MIN(conversion) OVER(PARTITION BY franchise,clasificacion))) as conversion_scaled
 FROM
   product_pop_agg p),
 
@@ -332,19 +348,19 @@ FROM
 LEFT JOIN
   uplift u
 ON
-  p.franchise = u.franchise AND p.sku = u.sku
+  p.franchise = u.franchise AND p.sku = u.sku AND p.clasificacion = u.clasificacion
 LEFT JOIN
   behaviour b
 ON
-  p.franchise = b.franchise AND p.sku = b.sku AND (p.user_segment = b.user_segment) AND (p.gender_merged = b.gender_merged)
+  p.franchise = b.franchise AND p.clasificacion = b.clasificacion AND p.sku = b.sku AND (p.user_segment = b.user_segment) AND (p.gender_merged = b.gender_merged)
 LEFT JOIN
   popularity pop
 ON
-  p.franchise = pop.franchise AND p.sku = pop.sku
+  p.franchise = pop.franchise AND p.clasificacion = pop.clasificacion AND p.sku = pop.sku
 LEFT JOIN
   mov
 ON
-  mov.franchise = p.franchise
+  mov.franchise = p.franchise AND mov.clasificacion = p.clasificacion
 ORDER BY
   uplift_score DESC
 )
@@ -354,14 +370,9 @@ SELECT
 FROM
 (SELECT
   *,
-  ROW_NUMBER() OVER(PARTITION BY franchise,user_segment,gender_merged ORDER BY ild_score DESC, avg_item_discount_percentage) as ILD_score_ranking
+  ROW_NUMBER() OVER(PARTITION BY franchise,clasificacion,user_segment,gender_merged ORDER BY ild_score DESC, avg_item_discount_percentage) as ILD_score_ranking
 FROM
   metric_summary)
-WHERE
-  ILD_score_ranking <= 100
---  AND
---    lower(franchise) like '%carrefour-ar%'
--- AND
---   user_segment = 'ALL'
--- AND
---   gender_merged = 'ALL'
+--WHERE
+--  ILD_score_ranking <= 100
+ 

@@ -1,0 +1,75 @@
+DECLARE start_date DATE DEFAULT '2025-04-01';
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.qc_AAA_coverage_partner_MAUs` 
+-- PARTITION BY month_date
+-- AS
+
+
+WITH MAUs as
+(
+  SELECT *
+  FROM `peya-food-and-groceries.user_joaquin_guerra.temp_qc_coverage_customer_location_PERU`
+  WHERE month_date >= start_date
+  AND customer_geogpoint IS NOT NULL
+),
+
+platform_MAUS as (
+  SELECT month_date,zone_id, COUNT(DISTINCT customer_id) as customers_platorm
+  FROM `peya-food-and-groceries.user_joaquin_guerra.temp_qc_coverage_customer_location_PERU`
+  WHERE month_date >= start_date
+  AND customer_geogpoint IS NOT NULL
+  GROUP BY 
+    ALL
+)
+
+SELECT
+-- distinct
+-- M.month_date,
+-- ps.partner_id,
+-- partner_name,
+-- ps.country_name,
+-- ps.country_code,
+-- ps.city_name_lz,
+-- ps.city_id_lz,
+-- ps.zone_id,
+-- ps.zone_name,
+-- category_partner,
+-- franchise,
+-- is_shopper,
+-- count (distinct case when ST_WITHIN(customer_geogpoint,partner_shape) = true then customer_id else null end) customers_cubiertos,
+-- ANY_VALUE(pm.customers_platorm) as platform_cubiertos,
+-- ROUND(SAFE_DIVIDE(count (distinct case when ST_WITHIN(customer_geogpoint,partner_shape) = true then customer_id else null end),ANY_VALUE(pm.customers_platorm)),2) as maus_coverage,
+
+M.month_date,
+ps.city_name_lz,
+ps.city_id_lz,
+ps.zone_id,
+ps.zone_name,
+count (distinct case when ST_WITHIN(customer_geogpoint,partner_shape) = true then customer_id else null end) customers_cubiertos,
+ANY_VALUE(pm.customers_platorm) as platform_cubiertos,
+ROUND(SAFE_DIVIDE(count (distinct case when ST_WITHIN(customer_geogpoint,partner_shape) = true then customer_id else null end),ANY_VALUE(pm.customers_platorm)),2) as maus_coverage,
+
+
+
+
+FROM `peya-food-and-groceries.user_joaquin_guerra.temp_qc_AAA_coverage_partner_shapes_PERU` ps
+
+LEFT JOIN MAUs M
+ON  M.country_id  = ps.country_id
+AND M.month_date  = ps.month_date
+AND UPPER(M.city_name_lz)=UPPER(ps.city_name_lz)
+AND ps.zone_id = M.zone_id
+
+LEFT JOIN
+  platform_MAUS pm
+ON
+  pm.zone_id = ps.zone_id AND pm.month_date = ps.month_date
+
+WHERE ps.month_date >= start_date
+--AND ps.partner_id = 352841
+group by all
+--having count (distinct case when ST_WITHIN(customer_geogpoint,partner_shape) = true then customer_id else null end)  > 0
+
+
+
+

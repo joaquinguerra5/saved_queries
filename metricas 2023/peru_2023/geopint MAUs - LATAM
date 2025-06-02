@@ -1,0 +1,246 @@
+DECLARE start_date DATE DEFAULT '2025-04-01';
+
+
+CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_qc_coverage_customer_location_LATAM`
+
+
+PARTITION BY month_date
+
+
+AS
+
+
+WITH data AS
+(
+WITH
+city_name as
+(
+SELECT
+country.country_code,
+country_name,
+city.id as city_id_lz,
+city.name as city_name_lz,
+ST_Union_Agg(zones.shape) as WKT,
+
+
+FROM `peya-data-origins-pro.cl_hurrier.countries` AS country
+INNER JOIN UNNEST(cities) AS city
+INNER JOIN UNNEST(zones) AS zones
+INNER JOIN UNNEST(starting_points) AS sp
+WHERE 
+--lower(country.country_code)="pe" AND
+zones.name IS NOT NULL
+AND zones.is_active=TRUE
+
+
+GROUP BY ALL  
+),
+
+
+
+zone_name as
+(
+SELECT
+country.country_code,
+country_name,
+city.id as city_id_lz,
+city.name as city_name_lz,
+zones.id AS zone_id,
+zones.name AS zone_name,
+ST_Union_Agg(zones.shape) as WKT,
+
+
+FROM `peya-data-origins-pro.cl_hurrier.countries` AS country
+INNER JOIN UNNEST(cities) AS city
+INNER JOIN UNNEST(zones) AS zones
+INNER JOIN UNNEST(starting_points) AS sp
+WHERE
+-- lower(country.country_code)="pe" AND
+zones.name IS NOT NULL
+AND zones.is_active=TRUE
+
+
+GROUP BY ALL  
+),
+
+
+logistic_zone_order as
+(
+SELECT
+rider.country_code,
+order_code,
+rider.city_id,
+z.city_name_lz,
+rider.zone_id,
+z.zone_name,
+
+
+FROM `peya-data-origins-pro.cl_hurrier.orders_v2` o
+
+
+LEFT JOIN city_name c
+ON c.country_code=o.rider.country_code
+AND c.city_id_lz=o.rider.city_id
+
+
+LEFT JOIN zone_name z
+ON z.country_code=o.rider.country_code
+AND z.city_id_lz=o.rider.city_id
+AND z.zone_id=o.rider.zone_id
+
+
+WHERE created_date>=start_date
+--AND lower(o.rider.country_code) = 'pe'
+),
+
+
+
+
+customer_location as
+(
+SELECT
+    customer_id,
+    addressCoordinates,
+    income,
+    fo.country.country_code,
+    fo.country.country_name,
+    fo.country.country_id,
+    lz.city_id as city_id_lz,
+    lz.city_name_lz,
+    lz.zone_name,
+    lz.zone_id,
+    COUNT(DISTINCT IF(order_status = "CONFIRMED", order_id, NULL)) AS orders,
+    ST_GEOGPOINT(SAFE_CAST(SPLIT(fo.addressCoordinates, ",")[SAFE_ORDINAL(2)] AS FLOAT64), SAFE_CAST(SPLIT(fo.addressCoordinates, ",")[SAFE_ORDINAL(1)] AS FLOAT64)) AS customer_geogpoint,
+    ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY COUNT(DISTINCT IF(order_status = "CONFIRMED", order_id, NULL)) DESC,MAX(order_id) DESC) AS ranking_customer,
+
+
+FROM `peya-bi-tools-pro.il_core.fact_orders` fo
+
+
+LEFT JOIN logistic_zone_order lz
+ON SAFE_CAST(fo.order_id AS STRING)=lz.order_code
+
+
+LEFT JOIN `peya-data-origins-pro.raw_growth.cust_income` c
+ON c.cust_id=fo.customer_id
+
+
+WHERE fo.registered_date >= start_date
+AND order_status = "CONFIRMED"
+AND addressCoordinates IS NOT NULL
+--AND lower(fo.country.country_code) = 'pe'
+GROUP BY ALL
+),
+
+
+
+patch_customer_city_name as
+(
+SELECT
+c.customer_id,
+IF(ST_WITHIN(customer_geogpoint,WKT) IS TRUE,cc.city_name_lz,null) as city_name_lz,
+IF(ST_WITHIN(customer_geogpoint,WKT) IS TRUE,cc.city_id_lz,null) as city_id_lz,
+
+
+FROM customer_location c
+
+
+LEFT JOIN city_name cc
+ON UPPER(c.country_code)=UPPER(cc.country_code)
+
+
+WHERE ranking_customer=1
+AND ST_WITHIN(customer_geogpoint,WKT)
+),
+
+--  customer_id = 'e2vyJoHyV4S-aAJf9ZqAUA'  
+
+
+patch_customer_zone_name as
+(
+SELECT DISTINCT
+c.customer_id,
+IF(ST_WITHIN(customer_geogpoint,zn.WKT) IS TRUE,zn.zone_name,null) as zone_name,
+IF(ST_WITHIN(customer_geogpoint,zn.WKT) IS TRUE,SAFE_CAST(zn.zone_id AS INT64),null) as zone_id,
+ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY zn.zone_name DESC) as row_number_zone,
+
+
+FROM customer_location c
+
+
+LEFT JOIN zone_name zn
+ON UPPER(c.country_code)=UPPER(zn.country_code)
+
+
+WHERE ranking_customer=1
+AND ST_WITHIN(customer_geogpoint,WKT)
+
+
+),
+
+
+zone_name_patch as
+(
+SELECT *
+FROM patch_customer_zone_name
+--WHERE row_number_zone=1
+),
+
+
+MAUS as
+(
+SELECT DISTINCT
+DATE_TRUNC(registered_date,month) as month_date,
+fo.customer_id,
+
+
+FROM `peya-bi-tools-pro.il_core.fact_orders` fo
+
+
+WHERE
+order_status="CONFIRMED"
+AND registered_date>= start_date
+--AND lower(fo.country.country_code) = 'pe'
+)
+
+
+SELECT
+M.month_date,
+M.customer_id,
+cl.country_code,
+cl.country_id,
+cl.country_name,
+cl.city_name_lz as city_name_lz_a,
+p.city_name_lz as city_name_lz_b,
+COALESCE(p.city_name_lz,cl.city_name_lz) as city_name_lz,
+COALESCE(p.city_id_lz,cl.city_id_lz) as city_id,
+COALESCE(z.zone_name,cl.zone_name) as zone_name,
+COALESCE(z.zone_id,cl.zone_id) as zone_id,
+cl.income,
+cl.customer_geogpoint,
+
+
+FROM MAUs M
+
+
+LEFT JOIN customer_location cl
+ON cl.customer_id=M.customer_id
+AND ranking_customer=1
+
+
+LEFT JOIN patch_customer_city_name p
+ON p.customer_id=M.customer_id
+
+
+LEFT JOIN zone_name_patch z
+ON z.customer_id=M.customer_id
+
+
+WHERE cl.customer_geogpoint IS NOT NULL
+)
+
+SELECT
+  *
+FROM
+  data
+
