@@ -1,3 +1,5 @@
+DECLARE orders_date DATE DEFAULT '2025-01-01';
+
 WITH partners_activos AS (
   SELECT
     DISTINCT partner_id
@@ -102,7 +104,7 @@ INNER JOIN
 ON
 aaa.partner_id = fo.vendor.id
 WHERE
-  DATE(fo.registered_date) BETWEEN '2024-10-01'
+  DATE(fo.registered_date) BETWEEN orders_date
   AND CURRENT_DATE()
   AND fo.state = 'CONFIRMED'
   --AND
@@ -184,6 +186,3 @@ FROM
   preview
 GROUP BY
   ALL
-
-
-
