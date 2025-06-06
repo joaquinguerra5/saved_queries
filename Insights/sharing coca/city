@@ -5,7 +5,7 @@ DECLARE categories ARRAY<STRING>;
 
 SET country_filter = ['Argentina', 'Uruguay', 'Chile', 'Perú', 'Bolivia', 'Costa Rica', 'Guatemala','Panama','Ecuador','Dominican Republic'];
 SET CPG_filter = 'Coca Cola';
-SET date_filter = '2025-06-01';
+SET date_filter = CURRENT_DATE();
 SET categories = ['beverages'];
 
 WITH base AS (
