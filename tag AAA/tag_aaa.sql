@@ -26,14 +26,15 @@ orders.country_code as cc,
 orders.city,
 CASE 
 WHEN orders.franchise_id =  '0011r00002VoIJ0AAN' /*Carrefour AR*/ AND orders.country_code = 'AR' and orders.partner_name LIKE  "Carrefour - Express%" OR orders.partner_name LIKE "Carrefour Flash" THEN 'Small Supermarket'
+WHEN orders.franchise_id =  '0016900002f7gZyAAI' /*Coral EC*/ AND orders.country_code = 'EC' and lower(orders.partner_name) LIKE  "%express%" THEN 'Small Supermarket'
 WHEN orders.franchise_id IN (
   '0011r00002VoHgPAAV', -- DAR
   '0011r00002VoI9AAAV', -- DIA
   '0016900002f9CSHAA2', -- FRESH MARKET
   '0016900002w3vOKAAY', -- UNICASA
   '001690000350YBcAAM', -- AMARKET
-  '001bO000006U6cUQAS', -- CARREFOUR DO
   '001bO000006UJjJQAW',  -- PLAZAS
+  '0016900002ncEiGAAU',	-- Super El Abastecedor
   -------------- NUEVOS IDS DH
 '001bO00000ERXWCQA5', -- COMODIN
 '001bO00000ERXZPQA5', -- AMPM - CR
