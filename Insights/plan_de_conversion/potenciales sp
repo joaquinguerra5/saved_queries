@@ -1,0 +1,43 @@
+WITH ranking AS
+(
+SELECT 
+    dc.global_entity_id,
+    dp.country.country_name,
+    DATE_TRUNC(a.date,MONTH) as month,
+    dp.is_darkstore,
+    a.product_name,
+    a.barcode, 
+    a.level_one,
+    a.level_two,
+    a.level_three,
+    dvp.master_code,
+    SUM(a.clicks) AS product_clicked,
+    ROW_NUMBER() OVER(PARTITION BY dp.country.country_name,a.level_one,a.level_two ORDER BY SUM(a.clicks) DESC) as ranking_cat
+  --  COUNT(DISTINCT user) AS users
+  FROM `peya-food-and-groceries.automated_tables_reports.media_insights_product_popularity` a
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` dp
+    ON dp.partner_id = a.partner_id
+  --CROSS JOIN UNNEST(a.users_product_clicked) AS user -- Desanida el ARRAY
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` dc 
+    ON dc.country_name = dp.country.country_name
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+  ON
+    dvp.remote_vendor_id = a.partner_id AND dvp.remote_product_id = a.product_id
+  WHERE a.date BETWEEN '2025-01-01' AND '2025-01-31'  
+  -- and country_name = 'Uruguay'
+  --AND country_id = 3
+  GROUP BY ALL)
+
+SELECT
+  month,
+  country_name,
+  level_one,
+  level_two,
+  SUM(product_clicked) as clicks
+FROM
+  ranking
+WHERE
+  ranking_cat <= 6
+GROUP BY
+  ALL

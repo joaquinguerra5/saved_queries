@@ -1,0 +1,128 @@
+DECLARE date_from DATE DEFAULT '2025-05-01';
+DECLARE date_to DATE DEFAULT '2025-05-31';
+
+WITH clicks_potenciales_sp AS
+(SELECT
+  month,
+  country_name,
+  'SP' as asset_type,
+  level_one as category,
+  level_two as subcategory,
+  SUM(product_clicked) as clicks
+FROM
+(
+SELECT 
+    dc.global_entity_id,
+    dp.country.country_name,
+    a.month,
+    a.level_one,
+    a.level_two,
+    dvp.master_code,
+    SUM(a.clicks) AS product_clicked,
+    ROW_NUMBER() OVER(PARTITION BY month,dp.country.country_name,a.level_one,a.level_two ORDER BY SUM(a.clicks) DESC) as ranking_cat
+  --  COUNT(DISTINCT user) AS users
+  FROM `peya-food-and-groceries.automated_tables_reports.media_insights_product_popularity` a
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` dp
+    ON dp.partner_id = a.partner_id
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` dc 
+    ON dc.country_name = dp.country.country_name
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+  ON
+    dvp.remote_vendor_id = a.partner_id AND dvp.remote_product_id = a.product_id
+  WHERE a.date BETWEEN date_from AND date_to  
+  -- and country_name = 'Uruguay'
+  --AND country_id = 3
+  GROUP BY ALL)
+WHERE
+  ranking_cat <= 6
+GROUP BY
+  ALL
+
+),
+
+
+clicks_dh_ads_sp AS(
+SELECT 
+  country_name,
+  month,
+  category,
+  subcategory,
+  account_type,
+  SUM(cliks_dh_ads) AS cliks_dh_ads
+FROM 
+(
+Select 
+  p.country.country_name,
+  DATE_TRUNC(adtech.date,MONTH) as month,
+  -- is_darkstore,
+  vendor_id,
+  barcodes,
+  search_keyword,
+  CASE
+    WHEN account_type = 'media_agency' THEN account_type
+    ELSE 'cpg'
+  END as account_type,
+  vp.product_name,
+  vp.master_category_names.level_one as category,
+  vp.master_category_names.level_two as subcategory,
+  product_master_code,
+  total_clicks AS cliks_dh_ads
+FROM `peya-data-origins-pro.cl_dmarts.qcadtech_agg_dmp_v2` AS adtech
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` p
+ON
+  p.partner_id = CAST(adtech.vendor_id AS INT64)
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS dim_country
+  ON adtech.global_entity_id = dim_country.global_entity_id
+  AND dim_country.active IS TRUE
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_currency_exchange` AS currency
+  ON DATE_TRUNC(adtech.date, MONTH) = currency.currency_exchange_date
+  AND adtech.currency_code = currency.currency_iso
+  AND dim_country.currency_id = currency.currency_id
+LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` vp
+        ON p.partner_id = vp.remote_vendor_id
+        AND adtech.product_master_code = vp.master_code
+        and vendor_is_online
+        and product_is_active
+        and category_tree_source != 'VENDOR'
+WHERE 
+  adtech.date BETWEEN date_from AND date_to 
+  --AND adtech.asset_type = 'AD_TYPE_SEARCH'
+  AND adtech.asset_type = 'AD_TYPE_LISTING'
+  AND campaign_type =  'AD_FORMAT_PRODUCT_AD'
+  AND LOWER(adtech.campaign_name) NOT LIKE "%nternal%"
+  AND LOWER(adtech.campaign_name) NOT LIKE '%upselling%'
+  AND NOT (
+      REGEXP_CONTAINS(UPPER(adtech.account_name), 'DMART')
+      OR REGEXP_CONTAINS(UPPER(adtech.account_name), 'LOCAL SHOPS'))
+)
+-- WHERE
+--   country_name = 'Uruguay'
+GROUP BY ALL
+)
+
+
+
+SELECT
+  FORMAT_DATE('%Y-%m', p_sp.month) as month_year,
+  p_sp.country_name,
+  p_sp.asset_type,
+  dh_sp.account_type,
+  p_sp.category,
+  p_sp.subcategory,
+  p_sp.clicks as clicks_potenciales,
+  dh_sp.cliks_dh_ads as clicks_dh_ads,
+  ROUND(SAFE_DIVIDE(dh_sp.cliks_dh_ads,p_sp.clicks),2) as fill_rate,
+  obj_sp.obetivo_clicks as obj_clicks,
+  obj_sp.revenue_anual_ml as obj_revenue_anual_ml,
+  obj_sp.revenue_anual_euros as obj_revenue_anual_euros,
+FROM
+  clicks_potenciales_sp p_sp
+LEFT JOIN
+  clicks_dh_ads_sp dh_sp
+USING
+  (month,country_name,category,subcategory)
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_SP_objectives` obj_sp
+ON
+  obj_sp.country = p_sp.country_name AND obj_sp.level_two = p_sp.subcategory

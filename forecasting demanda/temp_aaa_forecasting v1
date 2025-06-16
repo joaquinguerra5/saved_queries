@@ -2,14 +2,14 @@ DECLARE date_from DATE DEFAULT '2024-01-01';
 DECLARE date_to DATE DEFAULT CURRENT_DATE();
 
 
--- CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_aaa_forecasting`
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.temp_aaa_forecasting`
 
--- PARTITION BY timestamp
+PARTITION BY timestamp
 
--- CLUSTER BY
---  partner_id
+CLUSTER BY
+ partner_id
 
--- AS
+AS
 
 WITH partners AS (
   SELECT

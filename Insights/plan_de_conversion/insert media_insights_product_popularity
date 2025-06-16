@@ -1,0 +1,52 @@
+ DECLARE day DATE DEFAULT DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY);
+--DECLARE day DATE DEFAULT '2025-05-01';
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.media_insights_product_popularity`
+
+-- PARTITION BY date
+
+-- CLUSTER BY partner_id, product_id, sku
+
+-- AS
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.media_insights_product_popularity`
+
+WITH products AS
+(
+SELECT
+  pop.date,
+  pop.partner_id,
+  pop.product_id,
+  pop.product_name,
+  pop.barcode,
+  pop.sku,
+  level_one,
+  level_two,
+  level_three,
+  product_is_active,
+  SUM(any_click) as clicks,
+  SUM(confirmed_orders) as orders,
+  SAFE_DIVIDE(SUM(confirmed_orders),SUM(any_click)) as conversion
+FROM
+  `peya-bi-tools-pro.il_qcommerce.popularity` pop
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+ON
+  dvps.snapshot_date = pop.date AND dvps.remote_vendor_id = pop.partner_id AND dvps.remote_product_id = pop.product_id
+WHERE
+  pop.date = day
+AND
+  dvps.snapshot_date = day
+--   pop.date >= day
+-- AND
+--   dvps.snapshot_date >= day
+GROUP BY
+  ALL
+)
+
+SELECT
+  *
+FROM
+  products
+WHERE
+  product_is_active OR clicks>0 OR orders>0
