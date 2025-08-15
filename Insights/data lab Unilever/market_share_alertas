@@ -1,0 +1,127 @@
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_datalab_marketshare`
+
+-- PARTITION BY report_period
+
+-- AS
+WITH base AS
+(SELECT
+    'Weekly' as period,
+    DATE_TRUNC(report_period,WEEK) as report_period,
+    country_name,
+    dp.city.name AS city_name,
+    c.latitude,
+    c.longitude,
+    CASE 
+      WHEN dip.is_dmart THEN 'Dmart' 
+      WHEN aaa.partner_id IS NOT NULL THEN 'AAA' 
+      ELSE 'Local Shops'
+    END AS tipo_tienda,
+    master_category_lvl_one,
+    master_category_lvl_two,
+    master_category_lvl_three,
+    dvps.master_category_names.level_four as master_category_lvl_four,
+    SUM(CASE WHEN product_cpg = 'Unilever' THEN total_price_eur END) AS gmv_eu_unilever,
+    SUM(CASE WHEN product_cpg = 'Unilever' THEN total_price_lc END) AS gmv_lc_unilever,
+    SUM(CASE WHEN product_cpg = 'Unilever' THEN quantity END) as quantity_unilever,
+    SUM(total_price_eur) AS gmv_eu,
+    SUM(total_price_lc) AS gmv_lc,
+    SUM(quantity) as quantity
+  FROM `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip` dip
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  ON
+    SAFE_CAST(dvps.remote_vendor_id AS STRING) = dip.platform_vendor_id AND dvps.sku = dip.sku AND dvps.snapshot_date = dip.report_period
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_partner` dp
+  ON
+    SAFE_CAST(dp.partner_id AS STRING) = dip.platform_vendor_id
+  LEFT JOIN 
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    SAFE_CAST(aaa.partner_id AS STRING) = dip.platform_vendor_id AND aaa.snapshot_date = dip.report_period
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_city` c
+  ON
+    c.city_id = dp.city_id AND dp.country.country_name = c.country.country_name
+  WHERE
+    country_name = 'Argentina'
+      AND 
+    report_period BETWEEN '2025-04-01' AND '2025-07-31'
+      AND
+    dip.quantity > 0
+    AND
+      dvps.snapshot_date BETWEEN '2025-04-01' AND '2025-07-31'
+    -- AND
+    --   product_cpg = 'Unilever'
+    -- AND
+    --   barcodes IS NULL
+  GROUP BY
+    ALL
+
+UNION ALL
+
+SELECT
+    'Monthly' as period,
+    DATE_TRUNC(report_period,MONTH) as report_period,
+    country_name,
+    dp.city.name AS city_name,
+    c.latitude,
+    c.longitude,
+    CASE 
+      WHEN dip.is_dmart THEN 'Dmart' 
+      WHEN aaa.partner_id IS NOT NULL THEN 'AAA' 
+      ELSE 'Local Shops'
+    END AS tipo_tienda,
+    master_category_lvl_one,
+    master_category_lvl_two,
+    master_category_lvl_three,
+    dvps.master_category_names.level_four as master_category_lvl_four,
+    SUM(CASE WHEN product_cpg = 'Unilever' THEN total_price_eur END) AS gmv_eu_unilever,
+    SUM(CASE WHEN product_cpg = 'Unilever' THEN total_price_lc END) AS gmv_lc_unilever,
+    SUM(CASE WHEN product_cpg = 'Unilever' THEN quantity END) as quantity_unilever,
+    SUM(total_price_eur) AS gmv_eu,
+    SUM(total_price_lc) AS gmv_lc,
+    SUM(quantity) as quantity
+  FROM `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip` dip
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  ON
+    SAFE_CAST(dvps.remote_vendor_id AS STRING) = dip.platform_vendor_id AND dvps.sku = dip.sku AND dvps.snapshot_date = dip.report_period
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_partner` dp
+  ON
+    SAFE_CAST(dp.partner_id AS STRING) = dip.platform_vendor_id
+  LEFT JOIN 
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    SAFE_CAST(aaa.partner_id AS STRING) = dip.platform_vendor_id AND aaa.snapshot_date = dip.report_period
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_city` c
+  ON
+    c.city_id = dp.city_id AND dp.country.country_name = c.country.country_name
+  WHERE
+    country_name = 'Argentina'
+      AND 
+    report_period BETWEEN '2025-04-01' AND '2025-07-31'
+      AND
+    dip.quantity > 0
+    AND
+      dvps.snapshot_date BETWEEN '2025-04-01' AND '2025-07-31'
+    -- AND
+    --   product_cpg = 'Unilever'
+    -- AND
+    --   barcodes IS NULL
+  GROUP BY
+    ALL
+)
+
+SELECT
+  *,
+  LAG(gmv_eu_unilever) OVER(PARTITION BY period,country_name,city_name,tipo_tienda,master_category_lvl_one, master_category_lvl_two,master_category_lvl_three,master_category_lvl_four ORDER BY report_period) as gmv_eu_unilever_prev,
+  LAG(gmv_lc_unilever) OVER(PARTITION BY period,country_name,city_name,tipo_tienda,master_category_lvl_one, master_category_lvl_two,master_category_lvl_three,master_category_lvl_four ORDER BY report_period) as gmv_lc_unilever_prev,
+  LAG(quantity_unilever) OVER(PARTITION BY period,country_name,city_name,tipo_tienda,master_category_lvl_one, master_category_lvl_two,master_category_lvl_three,master_category_lvl_four ORDER BY report_period) as quantity_unilever_prev,
+  LAG(gmv_eu) OVER(PARTITION BY period,country_name,city_name,tipo_tienda,master_category_lvl_one, master_category_lvl_two,master_category_lvl_three,master_category_lvl_four ORDER BY report_period) as gmv_eu,
+  LAG(gmv_lc) OVER(PARTITION BY period,country_name,city_name,tipo_tienda,master_category_lvl_one, master_category_lvl_two,master_category_lvl_three,master_category_lvl_four ORDER BY report_period) as gmv_lc,
+  LAG(quantity) OVER(PARTITION BY period,country_name,city_name,tipo_tienda,master_category_lvl_one, master_category_lvl_two,master_category_lvl_three,master_category_lvl_four ORDER BY report_period) as quantity_prev
+FROM
+  base

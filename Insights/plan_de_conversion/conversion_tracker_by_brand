@@ -1,0 +1,285 @@
+DECLARE date_from DATE DEFAULT DATE_TRUNC(CURRENT_DATE()-1,MONTH);
+DECLARE date_to DATE DEFAULT CURRENT_DATE()-1;
+DECLARE cluster_andina ARRAY<STRING> DEFAULT ['Bolivia','Chile','Ecuador','Perú'];
+DECLARE cluster_sur ARRAY<STRING> DEFAULT ['Argentina','Paraguay','Uruguay'];
+
+ CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.media_insights_conversion_tracker_by_brand`
+
+ AS
+
+
+-- AS
+
+--INSERT INTO `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_by_category`
+
+
+
+WITH
+
+country_brands AS (
+  SELECT
+    DATE_TRUNC(fo.registered_date,MONTH) as month,
+    fo.country_id,
+    fo.country.country_name,
+    dvps.master_category_names.level_one,
+    dvps.master_category_names.level_two,
+    COALESCE(pim.brands_name, dvps.brand_name) as brand_name,
+    pim.brand_owner_name as cpg,
+    COUNT(DISTINCT fo.order_id) as orders,
+    SUM(d.quantity) as units,
+    SUM(d.total) as gfv_lc,
+    SUM(SAFE_DIVIDE(d.total,rate_eu)) as gfv_eu
+  FROM
+    `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+  INNER JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  ON
+    dvps.remote_vendor_id = fo.restaurant.id AND dvps.remote_product_id = d.product.product_id AND dvps.snapshot_date = fo.registered_date
+  LEFT JOIN
+    `peya-data-origins-pro.cl_dmarts.pim_product` pim
+  ON
+    pim.product_id = dvps.master_code
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_currency_exchange` AS dim_currency_exchange
+  ON
+    dim_currency_exchange.currency_exchange_date = DATE_TRUNC(fo.registered_date, month)
+    AND dim_currency_exchange.currency_id = restaurant.country.currency.id
+  WHERE
+    fo.registered_date BETWEEN date_from AND date_to
+  AND
+    dvps.snapshot_date BETWEEN date_from AND date_to
+  AND
+    fo.order_status = 'CONFIRMED'
+  AND
+    d.quantity > 0
+  GROUP BY
+    ALL
+),
+
+
+
+clicks_dh_ads_v2 AS (
+  SELECT 
+  DATE_TRUNC(date,MONTH) as month,
+  country_name,
+  master_category_names.level_one as category,
+  master_category_names.level_two as subcategory,
+  COALESCE(pim.brands_name,vp.brand_name) as brand_name,
+  pim.brand_owner_name as cpg,
+  CASE
+    WHEN account_type = 'media_agency' THEN account_type
+    ELSE 'cpg'
+  END as account_type, 
+  asset_type,
+  SUM(ad.impressions) AS imp,
+  SUM(ad.total_clicks) AS clicks,
+  SUM(ad.sales_revenue) AS sales_revenue,
+  SAFE_DIVIDE(SUM(ad.sales_revenue),AVG(currency.rate_eu)) AS sales_revenue_eur,
+  SUM(ad.ad_spend) AS ad_spend,
+  SAFE_DIVIDE(SUM(ad.ad_spend),AVG(currency.rate_eu)) AS ad_spend_eur,
+  SAFE_DIVIDE(SUM(sales_revenue),SUM(ad_spend)) AS ROAS,
+  SAFE_DIVIDE(SUM(ad_spend),SUM(total_clicks)) AS CPC,
+  SAFE_DIVIDE(SAFE_DIVIDE(SUM(ad.ad_spend), AVG(currency.rate_eu)), SUM(total_clicks)) AS CPC_eur,
+  COUNT(distinct(account_name)) as count_account_names,
+  COUNT(DISTINCT(ad.account_owner)) as count_account_owners,
+FROM `peya-data-origins-pro.cl_dmarts.qcadtech_agg_dmp_v2` AS ad
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` p
+ON
+  p.partner_id = CAST(ad.vendor_id AS INT64)
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS dim_country
+  ON ad.global_entity_id = dim_country.global_entity_id
+  AND dim_country.active IS TRUE
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_currency_exchange` AS currency
+  ON DATE_TRUNC(ad.date, MONTH) = currency.currency_exchange_date
+  AND ad.currency_code = currency.currency_iso
+  AND dim_country.currency_id = currency.currency_id
+LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` vp
+        ON p.partner_id = vp.remote_vendor_id
+        AND ad.product_master_code = vp.master_code
+        and vendor_is_online
+        and product_is_active
+        and category_tree_source != 'VENDOR'
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  pim.product_id = ad.product_master_code
+  WHERE ad.date BETWEEN date_from AND date_to
+    AND LOWER(ad.campaign_name) NOT LIKE '%nternal%'
+    AND LOWER(ad.campaign_name) NOT LIKE '%upselling%'
+    AND ad.asset_type IN ('AD_TYPE_LISTING','AD_TYPE_SEARCH')
+    AND ad.campaign_type = 'AD_FORMAT_PRODUCT_AD'
+    AND NOT (
+      REGEXP_CONTAINS(UPPER(ad.account_name), 'DMART')
+      OR REGEXP_CONTAINS(UPPER(ad.account_name), 'LOCAL SHOPS'))
+    
+    GROUP BY ALL
+),
+
+
+clicks_dh_ads AS(
+SELECT 
+  country_name,
+  month,
+  asset_type,
+  category,
+  subcategory,
+  account_type,
+  SUM(cliks_dh_ads) AS cliks_dh_ads
+FROM 
+(
+Select 
+  p.country.country_name,
+  DATE_TRUNC(adtech.date,MONTH) as month,
+  -- is_darkstore,
+  vendor_id,
+  barcodes,
+  search_keyword,
+  adtech.asset_type,
+  CASE
+    WHEN account_type = 'media_agency' THEN account_type
+    ELSE 'cpg'
+  END as account_type,
+  vp.product_name,
+  vp.master_category_names.level_one as category,
+  vp.master_category_names.level_two as subcategory,
+  product_master_code,
+  total_clicks AS cliks_dh_ads
+FROM `peya-data-origins-pro.cl_dmarts.qcadtech_agg_dmp_v2` AS adtech
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` p
+ON
+  p.partner_id = CAST(adtech.vendor_id AS INT64)
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS dim_country
+  ON adtech.global_entity_id = dim_country.global_entity_id
+  AND dim_country.active IS TRUE
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_currency_exchange` AS currency
+  ON DATE_TRUNC(adtech.date, MONTH) = currency.currency_exchange_date
+  AND adtech.currency_code = currency.currency_iso
+  AND dim_country.currency_id = currency.currency_id
+LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` vp
+        ON p.partner_id = vp.remote_vendor_id
+        AND adtech.product_master_code = vp.master_code
+        and vendor_is_online
+        and product_is_active
+        and category_tree_source != 'VENDOR'
+WHERE 
+  adtech.date BETWEEN date_from AND date_to 
+  AND adtech.asset_type IN ('AD_TYPE_LISTING','AD_TYPE_SEARCH')
+  AND campaign_type =  'AD_FORMAT_PRODUCT_AD'
+  AND LOWER(adtech.campaign_name) NOT LIKE "%nternal%"
+  AND LOWER(adtech.campaign_name) NOT LIKE '%upselling%'
+  AND NOT (
+      REGEXP_CONTAINS(UPPER(adtech.account_name), 'DMART')
+      OR REGEXP_CONTAINS(UPPER(adtech.account_name), 'LOCAL SHOPS'))
+)
+-- WHERE
+--   country_name = 'Uruguay'
+GROUP BY ALL
+)
+
+
+---- INFO SPONSORED PRODUCTS
+
+SELECT
+  ----- CONTEXTO
+  COALESCE(DATE_TRUNC(cb.month,MONTH),DATE_TRUNC(dh_sp.month,MONTH)) as yyyymmdd,
+  COALESCE(FORMAT_DATE('%Y-%m', cb.month),FORMAT_DATE('%Y-%m', dh_sp.month)) as month_year,
+  COALESCE(cb.country_name,dh_sp.country_name) as country_name,
+  CASE
+    WHEN COALESCE(cb.country_name,dh_sp.country_name) IN UNNEST(cluster_andina) THEN 'Andina'
+    WHEN COALESCE(cb.country_name,dh_sp.country_name) IN UNNEST(cluster_sur) THEN 'Sur'
+    ELSE 'Norte'
+  END as cluster,
+  'Search' as asset_type,
+  dh_sp.account_type,
+  COALESCE(cb.level_one,dh_sp.category) as category,
+  COALESCE(cb.level_two,dh_sp.subcategory) as subcategory,
+  CASE
+    WHEN obj_sp.level_two IS NOT NULL THEN TRUE
+    ELSE FALSE
+  END as is_foco,
+  COALESCE(cb.brand_name,dh_sp.brand_name) as brand_name,
+  COALESCE(cb.cpg,dh_sp.cpg) as cpg,
+  COALESCE(cb.orders,0) as orders_qc,
+  COALESCE(cb.units,0) as units_qc,
+  COALESCE(ROUND(cb.gfv_lc,2),0) as gfv_lc_qc,
+  COALESCE(ROUND(cb.gfv_eu,2),0) as gfv_eu_qc,
+  ROW_NUMBER() OVER(PARTITION BY COALESCE(DATE_TRUNC(cb.month,MONTH),DATE_TRUNC(dh_sp.month,MONTH)),COALESCE(cb.country_name,dh_sp.country_name),COALESCE(cb.level_two,dh_sp.subcategory) ORDER BY COALESCE(cb.orders,0) DESC, COALESCE(cb.gfv_lc,0) DESC, COALESCE(cb.units,0) DESC) as ranking_brand_cat,
+  ----- DH ADS-------
+  dh_sp.imp as impressions_dh_ads,
+  dh_sp.clicks as clicks_dh_ads,
+  dh_sp.sales_revenue as sales_revenue_ml_dh_ads,
+  dh_sp.sales_revenue_eur as sales_revenue_eur_dh_ads,
+  dh_sp.ad_spend as ad_spend_ml_dh_ads ,
+  dh_sp.ad_spend_eur as ad_spend_eur_dh_ads,
+  dh_sp.ROAS as ROAS_dh_ads,
+  dh_sp.CPC as CPC_ml_dh_ads,
+  dh_sp.CPC_eur as CPC_eur_dh_ads,
+  dh_sp.count_account_names as count_account_names_dh_ads,
+  dh_sp.count_account_owners as count_account_owners_dh_ads,
+FROM
+  country_brands cb
+FULL OUTER JOIN
+  (SELECT * FROM clicks_dh_ads_v2 WHERE asset_type = 'AD_TYPE_LISTING') dh_sp
+ON
+  cb.month = dh_sp.month AND cb.country_name = dh_sp.country_name AND cb.level_one = dh_sp.category AND cb.level_two = dh_sp.subcategory AND cb.brand_name = dh_sp.brand_name
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_SP_objectives` obj_sp
+ON
+  cb.country_name = obj_sp.country AND cb.level_two = obj_sp.level_two
+WHERE
+  COALESCE(cb.country_name,dh_sp.country_name) IS NOT NULL
+
+UNION ALL
+
+---- INFO SEARCH
+
+SELECT
+  ----- CONTEXTO
+  COALESCE(DATE_TRUNC(cb.month,MONTH),DATE_TRUNC(dh_se.month,MONTH)) as yyyymmdd,
+  COALESCE(FORMAT_DATE('%Y-%m', cb.month),FORMAT_DATE('%Y-%m', dh_se.month)) as month_year,
+  COALESCE(cb.country_name,dh_se.country_name) as country_name,
+  CASE
+    WHEN COALESCE(cb.country_name,dh_se.country_name) IN UNNEST(cluster_andina) THEN 'Andina'
+    WHEN COALESCE(cb.country_name,dh_se.country_name) IN UNNEST(cluster_sur) THEN 'Sur'
+    ELSE 'Norte'
+  END as cluster,
+  'Search' as asset_type,
+  dh_se.account_type,
+  COALESCE(cb.level_one,dh_se.category) as category,
+  COALESCE(cb.level_two,dh_se.subcategory) as subcategory,
+  CASE
+    WHEN obj_se.level_two IS NOT NULL THEN TRUE
+    ELSE FALSE
+  END as is_foco,
+  COALESCE(cb.brand_name,dh_se.brand_name) as brand_name,
+  COALESCE(cb.cpg,dh_se.cpg) as cpg,
+  ---- PERFORMANCE DE MARCA EN QC --------
+  COALESCE(cb.orders,0) as orders_qc,
+  COALESCE(cb.units,0) as units_qc,
+  COALESCE(ROUND(cb.gfv_lc,2),0) as gfv_lc_qc,
+  COALESCE(ROUND(cb.gfv_eu,2),0) as gfv_eu_qc,
+  ROW_NUMBER() OVER(PARTITION BY COALESCE(DATE_TRUNC(cb.month,MONTH),DATE_TRUNC(dh_se.month,MONTH)),COALESCE(cb.country_name,dh_se.country_name),COALESCE(cb.level_two,dh_se.subcategory) ORDER BY COALESCE(cb.orders,0) DESC, COALESCE(cb.gfv_lc,0) DESC, COALESCE(cb.units,0) DESC) as ranking_brand_cat,
+  ----- DH ADS------------
+  dh_se.imp as impressions_dh_ads,
+  dh_se.clicks as clicks_dh_ads,
+  dh_se.sales_revenue as sales_revenue_ml_dh_ads,
+  dh_se.sales_revenue_eur as sales_revenue_eur_dh_ads,
+  dh_se.ad_spend as ad_spend_ml_dh_ads ,
+  dh_se.ad_spend_eur as ad_spend_eur_dh_ads,
+  dh_se.ROAS as ROAS_dh_ads,
+  dh_se.CPC as CPC_ml_dh_ads,
+  dh_se.CPC_eur as CPC_eur_dh_ads,
+  dh_se.count_account_names as count_account_names_dh_ads,
+  dh_se.count_account_owners as count_account_owners_dh_ads,
+FROM
+  country_brands cb
+FULL OUTER JOIN
+  (SELECT * FROM clicks_dh_ads_v2 WHERE asset_type = 'AD_TYPE_SEARCH') dh_se
+ON
+  cb.month = dh_se.month AND cb.country_name = dh_se.country_name AND cb.level_one = dh_se.category AND cb.level_two = dh_se.subcategory AND cb.brand_name = dh_se.brand_name
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_search_objectives` obj_se
+ON
+  cb.country_name = obj_se.country AND cb.level_two = obj_se.level_two
+WHERE
+  COALESCE(cb.country_name,dh_se.country_name) IS NOT NULL

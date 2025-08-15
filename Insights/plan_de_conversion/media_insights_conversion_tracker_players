@@ -1,0 +1,136 @@
+-- DECLARE date_from DATE DEFAULT "2025-01-01";
+-- DECLARE date_to DATE DEFAULT CURRENT_DATE()-1;
+DECLARE date_from DATE DEFAULT DATE_TRUNC(CURRENT_DATE()-1,MONTH);
+DECLARE date_to DATE DEFAULT CURRENT_DATE()-1;
+DECLARE cluster_andina ARRAY<STRING> DEFAULT ['Bolivia','Chile','Ecuador','Perú'];
+DECLARE cluster_sur ARRAY<STRING> DEFAULT ['Argentina','Paraguay','Uruguay'];
+
+--  CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_players`
+
+-- PARTITION BY yyyymmdd
+
+--  AS
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_players`
+
+
+
+
+WITH
+
+pim_brand_owners AS (
+  SELECT
+    DISTINCT
+      brand_owner_name
+    FROM
+      `peya-data-origins-pro.cl_dmarts.pim_product`
+),
+
+clicks_dh_ads_v2 AS (
+  SELECT 
+  DATE_TRUNC(date,MONTH) as month,
+  country_name,
+  master_category_names.level_one as category,
+  master_category_names.level_two as subcategory,
+  asset_type,
+  CASE
+    WHEN account_type = 'media_agency' THEN account_type
+    ELSE 'cpg'
+  END as account_type,
+  CASE 
+    WHEN account_name = "" THEN NULL
+    ELSE account_name
+  END as account_name,
+  CASE 
+    WHEN ad.account_owner = "" THEN NULL
+    ELSE ad.account_owner
+  END as account_owner,
+  pim.brand_owner_name
+FROM `peya-data-origins-pro.cl_dmarts.qcadtech_agg_dmp_v2` AS ad
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` p
+ON
+  p.partner_id = CAST(ad.vendor_id AS INT64)
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS dim_country
+  ON ad.global_entity_id = dim_country.global_entity_id
+  AND dim_country.active IS TRUE
+LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` vp
+        ON p.partner_id = vp.remote_vendor_id
+        AND ad.product_master_code = vp.master_code
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  pim.product_id = ad.product_master_code
+  WHERE ad.date BETWEEN date_from AND date_to
+    AND LOWER(ad.campaign_name) NOT LIKE '%nternal%'
+    AND LOWER(ad.campaign_name) NOT LIKE '%upselling%'
+    AND ad.asset_type IN ('AD_TYPE_LISTING','AD_TYPE_SEARCH')
+    AND ad.campaign_type = 'AD_FORMAT_PRODUCT_AD'
+    AND NOT (
+      REGEXP_CONTAINS(UPPER(ad.account_name), 'DMART')
+      OR REGEXP_CONTAINS(UPPER(ad.account_name), 'LOCAL SHOPS'))
+)
+
+
+SELECT
+  DISTINCT
+  DATE_TRUNC(month,MONTH) as yyyymmdd,
+  FORMAT_DATE('%Y-%m', month) as month_year,
+  ads.country_name,
+  CASE
+    WHEN ads.country_name IN UNNEST(cluster_andina) THEN 'Andina'
+    WHEN ads.country_name IN UNNEST(cluster_sur) THEN 'Sur'
+    ELSE 'Norte'
+  END as cluster,
+  CASE 
+    WHEN asset_type = 'AD_TYPE_LISTING' THEN 'SP'
+    ELSE 'Search'
+  END asset_type,
+  category,
+  subcategory,
+  account_name,
+  account_owner,
+  ads.brand_owner_name,
+  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(lower(CASE
+    WHEN pbo.brand_owner_name IS NOT NULL THEN pbo.brand_owner_name
+    ELSE COALESCE(CASE WHEN ads.brand_owner_name = "Unbranded" THEN NULL ELSE ads.brand_owner_name END,COALESCE(account_name,account_owner))
+    END),'á','a'),'é','e'),'í','i'),'ó','o'),'ú','u') as player_name,
+  CASE
+    WHEN top.country_name IS NOT NULL THEN TRUE
+    ELSE FALSE
+  END as is_top_cpg,
+  CASE
+    WHEN obj_se.level_two IS NOT NULL OR obj_sp.level_two IS NOT NULL THEN TRUE
+    ELSE FALSE
+  END as is_foco
+FROM
+  clicks_dh_ads_v2 ads
+LEFT JOIN
+  pim_brand_owners pbo
+ON
+  REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(lower(pbo.brand_owner_name),'á','a'),'é','e'),'í','i'),'ó','o'),'ú','u') = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(lower(account_name),'á','a'),'é','e'),'í','i'),'ó','o'),'ú','u')
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.gsheet_ms_insights_top_cpgs` top
+ON
+  top.country_name = ads.country_name AND (lower(top.cpg_name) = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(lower(CASE
+    WHEN pbo.brand_owner_name IS NOT NULL THEN pbo.brand_owner_name
+    ELSE COALESCE(CASE WHEN ads.brand_owner_name = "Unbranded" THEN NULL ELSE ads.brand_owner_name END,COALESCE(account_name,account_owner))
+    END),'á','a'),'é','e'),'í','i'),'ó','o'),'ú','u') OR lower(top.brand_owner_pim) = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(lower(CASE
+    WHEN pbo.brand_owner_name IS NOT NULL THEN pbo.brand_owner_name
+    ELSE COALESCE(CASE WHEN ads.brand_owner_name = "Unbranded" THEN NULL ELSE ads.brand_owner_name END,COALESCE(account_name,account_owner))
+    END),'á','a'),'é','e'),'í','i'),'ó','o'),'ú','u'))
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_search_objectives` obj_se
+ON
+  obj_se.country = ads.country_name AND obj_se.level_two = ads.subcategory AND (CASE 
+    WHEN asset_type = 'AD_TYPE_LISTING' THEN 'SP'
+    ELSE 'Search'
+  END) = "Search"
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.media_insights_conversion_tracker_SP_objectives` obj_sp
+ON
+  obj_sp.country = ads.country_name AND obj_sp.level_two = ads.subcategory AND (CASE 
+    WHEN asset_type = 'AD_TYPE_LISTING' THEN 'SP'
+    ELSE 'Search'
+  END) = "SP"
+WHERE
+  ads.country_name IS NOT NULL

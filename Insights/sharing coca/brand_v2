@@ -1,0 +1,192 @@
+DECLARE country_filter ARRAY<STRING>;
+DECLARE CPG_filter STRING;
+DECLARE date_filter DATE;
+DECLARE categories ARRAY<STRING>;
+DECLARE sub_categories ARRAY<STRING>;
+
+SET country_filter = ['Argentina', 'Uruguay', 'Chile', 'Perú', 'Bolivia', 'Costa Rica', 'Guatemala','Panama','Ecuador','Dominican Republic'];
+SET CPG_filter = 'Coca Cola';
+-- SET date_filter = date_filter
+SET date_filter = CURRENT_DATE();
+SET categories = ['beverages'];
+SET sub_categories = ['juice / ice tea / sports / energy','soft drinks / mixers','water','pre-mixed','spirits','milk','ice cream / desserts','tea / coffee'];
+
+WITH base AS (
+SELECT
+  report_period AS report_period,
+  country_name,
+  COALESCE(dip.city,dp.city.name) AS city_name,
+  CASE WHEN is_dmart IS FALSE THEN 'Local Shop' ELSE 'Dmart' END AS tipo_tienda,
+  product_cpg,
+  product_brand,
+  product_name,
+  barcodes,
+  master_category_lvl_one AS categoria,
+  master_category_lvl_two AS subcategoria,
+  master_category_lvl_three AS l3_categoria,
+  CAST(order_id AS INT64) AS orders,
+  total_price_eur AS gmv_eu,
+  total_price_lc AS gmv_lc,
+  quantity
+FROM
+  `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip` dip
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  SAFE_CAST(dp.partner_id AS STRING) = dip.platform_vendor_id
+WHERE country_name IN UNNEST(country_filter)
+AND report_period BETWEEN DATE_TRUNC(DATE_SUB(date_filter, INTERVAL 1 WEEK), MONTH) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
+GROUP BY
+  ALL
+),
+
+competencia AS (
+  SELECT DISTINCT
+    country_name,
+    DATE_TRUNC(report_period, MONTH) AS mes,
+    CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END AS apertura,
+    city_name,
+    categoria,
+    subcategoria
+  FROM base
+  WHERE LOWER(subcategoria) in UNNEST(sub_categories)
+),
+
+
+resumen_subcategoria_mensual AS (
+  SELECT 
+    'Mensual' AS apertura_informacion,
+    DATE_TRUNC(c.report_period, MONTH) AS periodo,
+    c.country_name,
+    c.city_name,
+    CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END AS apertura,
+    c.categoria,
+    c.subcategoria,
+    COUNT(DISTINCT orders) AS orders_total_subcategoria,
+    SUM(gmv_eu) AS gmv_total_subcategoria,
+    SUM(gmv_lc) AS gmv_total_subcategoria_lc
+  FROM base c
+  INNER JOIN competencia com
+    ON com.mes = DATE_TRUNC(c.report_period, MONTH)
+    AND com.country_name = c.country_name
+    AND com.city_name = c.city_name
+    AND com.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+    AND com.categoria = c.categoria
+    AND com.subcategoria = c.subcategoria
+  WHERE CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'QC'
+  AND LOWER(c.subcategoria) in UNNEST(sub_categories)
+  GROUP BY ALL
+),
+
+
+resumen_subcategoria_diario AS (
+  SELECT 
+    'Diaria' AS apertura_informacion,
+    c.report_period AS periodo,
+    c.country_name,
+    c.city_name,
+    CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END AS apertura,
+    c.categoria,
+    c.subcategoria,
+    COUNT(DISTINCT orders) AS orders_total_subcategoria,
+    SUM(gmv_eu) AS gmv_total_subcategoria,
+    SUM(gmv_lc) AS gmv_total_subcategoria_lc
+  FROM base c
+  INNER JOIN competencia com
+    ON com.mes = DATE_TRUNC(c.report_period, MONTH)
+    AND com.country_name = c.country_name
+    AND com.city_name = c.city_name
+    AND com.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+    AND com.categoria = c.categoria
+    AND com.subcategoria = c.subcategoria
+    
+  WHERE CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'QC'
+  AND LOWER(c.subcategoria) in UNNEST(sub_categories)
+  GROUP BY ALL
+)
+
+-- Resultados mensuales
+SELECT 
+  'Mensual' AS apertura_informacion,
+  DATE_TRUNC(c.report_period, MONTH) AS periodo,
+  c.country_name,
+  c.city_name,
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END AS apertura,
+  c.categoria,
+  c.subcategoria,
+  c.product_brand,
+  COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN orders ELSE NULL END) AS orders_cpg,
+  SUM(CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN gmv_lc ELSE NULL END) AS gmv_lc_cpg,
+  SUM(CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN quantity END) as unidades,
+  SAFE_DIVIDE(
+    COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN orders ELSE NULL END),
+    MAX(orders_total_subcategoria)
+  ) AS incidencia,
+  SAFE_DIVIDE(
+    SUM(CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN gmv_lc ELSE NULL END),
+    MAX(gmv_total_subcategoria_lc)
+  ) AS share
+FROM base c
+INNER JOIN competencia com
+  ON com.mes = DATE_TRUNC(c.report_period, MONTH)
+  AND com.country_name = c.country_name
+  AND com.city_name = c.city_name
+  AND com.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+  AND com.categoria = c.categoria
+  AND com.subcategoria = c.subcategoria
+INNER JOIN resumen_subcategoria_mensual rc
+  ON rc.periodo = DATE_TRUNC(c.report_period, MONTH)
+  AND rc.country_name = c.country_name
+  AND rc.city_name = c.city_name
+  AND rc.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+  AND rc.categoria = c.categoria
+  AND rc.subcategoria = c.subcategoria
+WHERE
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'QC'
+  AND c.product_cpg = CPG_filter
+GROUP BY ALL
+
+UNION ALL
+
+-- Resultados diarios
+SELECT 
+  'Diaria' AS apertura_informacion,
+  c.report_period AS periodo,
+  c.country_name,
+  c.city_name,
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END AS apertura,
+  c.categoria,
+  c.subcategoria,
+  c.product_brand,
+  COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN orders ELSE NULL END) AS orders_cpg,
+  SUM(CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN gmv_lc ELSE NULL END) AS gmv_lc_cpg,
+  SUM(CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN quantity END) as unidades,
+  SAFE_DIVIDE(
+    COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN orders ELSE NULL END),
+    MAX(orders_total_subcategoria)
+  ) AS incidencia,
+  SAFE_DIVIDE(
+    SUM(CASE WHEN product_cpg = CPG_filter AND LOWER(c.subcategoria) in UNNEST(sub_categories) THEN gmv_lc ELSE NULL END),
+    MAX(gmv_total_subcategoria_lc)
+  ) AS share
+FROM base c
+INNER JOIN competencia com
+  ON com.mes = DATE_TRUNC(c.report_period, MONTH)
+  AND com.country_name = c.country_name
+  AND com.city_name = c.city_name
+  AND com.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+  AND com.categoria = c.categoria
+  AND com.subcategoria = c.subcategoria
+INNER JOIN resumen_subcategoria_diario rc
+  ON rc.periodo = c.report_period
+  AND rc.country_name = c.country_name
+  AND rc.city_name = c.city_name
+  AND rc.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+  AND rc.categoria = c.categoria
+  AND rc.subcategoria = c.subcategoria
+WHERE
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'QC'
+  AND c.product_cpg = CPG_filter
+ AND c.report_period BETWEEN DATE_SUB(date_filter, INTERVAL 7 DAY) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
+GROUP BY ALL
+ORDER BY apertura_informacion, periodo, country_name, city_name, subcategoria, product_brand

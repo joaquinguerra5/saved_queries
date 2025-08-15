@@ -1,0 +1,58 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_datalab_marketshare_ar`
+
+PARTITION BY report_period
+
+AS
+
+SELECT
+    report_period as report_period,
+    DATE_TRUNC(report_period,MONTH) as month,
+    DATE_TRUNC(report_period,WEEK) as week,
+    country_name,
+    dp.city.name AS city_name,
+    c.latitude,
+    c.longitude,
+    CASE 
+      WHEN dip.is_dmart THEN 'Dmart' 
+      WHEN aaa.partner_id IS NOT NULL THEN 'AAA' 
+      ELSE 'Local Shops'
+    END AS tipo_tienda,
+    product_cpg,
+    product_brand,
+    dip.product_name,
+    dip.barcodes,
+    dvps.master_category_names.level_one as master_category_lvl_one,
+    dvps.master_category_names.level_two as master_category_lvl_two,
+    dvps.master_category_names.level_three as master_category_lvl_three,
+    dvps.master_category_names.level_four as master_category_lvl_four,
+    order_id,
+    COALESCE(total_price_eur,0) AS gmv_eu,
+    COALESCE(total_price_lc,0) AS gmv_lc,
+    COALESCE(quantity,0) as quantity
+  FROM `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip` dip
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  ON
+    SAFE_CAST(dvps.remote_vendor_id AS STRING) = dip.platform_vendor_id AND dvps.sku = dip.sku
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_partner` dp
+  ON
+    SAFE_CAST(dp.partner_id AS STRING) = dip.platform_vendor_id
+  LEFT JOIN 
+    `peya-food-and-groceries.automated_tables_reports.partners_aaa_snapshot` aaa
+  ON
+    SAFE_CAST(aaa.partner_id AS STRING) = dip.platform_vendor_id AND aaa.snapshot_date = dip.report_period
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_city` c
+  ON
+    c.city_id = dp.city_id AND dp.country.country_name = c.country.country_name
+  WHERE
+    country_name = 'Argentina'
+      AND 
+    report_period >= '2025-06-01'
+      AND
+    dip.quantity > 0
+    AND
+      dvps.snapshot_date >= '2025-06-01'
+  GROUP BY
+    ALL

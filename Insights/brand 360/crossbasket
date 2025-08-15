@@ -1,0 +1,67 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.media_insights_brand_360_crossbasket`
+
+PARTITION BY month_year
+
+CLUSTER BY country_name,city,cross_feature,feature_1
+
+AS
+
+SELECT 
+  base.month_year,
+  'brand' as cross_feature,
+  base.country_name,
+  base.city,
+  base.business_vertical,
+  base.segments_ls,
+  base.consumption_occasion,
+  base.product_brand AS feature_1,
+  cros.product_brand AS feature_2,
+  COUNT(DISTINCT base.order_id) as orders
+FROM
+  `peya-food-and-groceries.automated_tables_reports.insights_ms_base`  base
+INNER JOIN
+  (SELECT 
+    order_id,
+    product_brand
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.insights_ms_base`  base
+  WHERE
+    month_year = DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)) cros
+ON
+  cros.order_id = base.order_id
+  AND base.product_brand !=  cros.product_brand
+WHERE  month_year = DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
+GROUP BY
+  ALL
+
+UNION ALL
+
+SELECT 
+  DISTINCT 
+  base.month_year,
+  'category' as cross_feature,
+  base.country_name,
+  base.city,
+  base.business_vertical,
+  base.segments_ls,
+  base.consumption_occasion,
+  base.master_category_lvl_one AS feature_1,
+  cros.master_category_lvl_one AS feature_2,
+  COUNT(DISTINCT base.order_id) as orders
+FROM
+  `peya-food-and-groceries.automated_tables_reports.insights_ms_base` base
+INNER JOIN
+  (SELECT 
+    order_id,
+    master_category_lvl_one
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.insights_ms_base` base
+  WHERE
+    month_year = DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
+    ) cros
+ON
+  cros.order_id = base.order_id
+  AND base.master_category_lvl_one !=  cros.master_category_lvl_one
+WHERE  month_year = DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
+GROUP BY
+  ALL
