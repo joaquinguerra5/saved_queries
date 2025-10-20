@@ -1,0 +1,562 @@
+
+DECLARE date_filter DATE DEFAULT DATE_SUB(CURRENT_DATE(),INTERVAL 15 DAY);
+--DECLARE date_filter DATE DEFAULT '2025-06-01';
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_datalab_investment_ar`
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_ms_insights_datalab_media_performance_ar`
+
+-- PARTITION BY day
+
+-- CLUSTER BY city_name, tool_name
+
+-- AS
+
+--INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_datalab_investment_ar`
+
+WITH base_orders_data AS (
+  SELECT
+    fo.restaurant.id AS restaurant_id,
+    fo.order_status,
+    fo.registered_date,
+    d.product.product_id AS product_id,
+    d.total,
+    dvp.master_code,
+    dvp.master_category_names,
+    dvp.is_dmart,
+    -- Usamos CROSS JOIN para desanidar las categorías del front-end. LEFT JOIN para no perder productos que no tengan categoría.
+    cat_name,
+    pim.brand_owner_name
+  FROM
+    `peya-bi-tools-pro.il_core.fact_orders` AS fo
+  -- La sintaxis moderna y explícita para desanidar es usando CROSS JOIN.
+  CROSS JOIN UNNEST(fo.details) AS d
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` AS dvp
+    ON dvp.remote_vendor_id = fo.restaurant.id AND d.product.product_id = dvp.remote_product_id
+    AND LOWER(dvp.country_code) = 'ar' -- Filtramos en el ON para mayor eficiencia
+  LEFT JOIN
+    `peya-data-origins-pro.cl_dmarts.pim_product` AS pim
+    ON pim.product_id = dvp.master_code
+    AND pim.brand_owner_name IS NOT NULL AND LOWER(pim.brand_owner_name) != 'unbranded'
+  -- Desanidamos las categorías del front-end por separado para mantener la granularidad correcta.
+  LEFT JOIN UNNEST(dvp.category_name) AS cat_name
+  WHERE
+    fo.registered_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 15 DAY)
+    AND fo.order_status = 'CONFIRMED'
+),
+
+base_orders_data_v2 AS (
+  SELECT
+    dvp.remote_vendor_id AS restaurant_id,
+    dip.report_period AS registered_date,
+    dvp.remote_product_id AS product_id,
+    dvp.master_code,
+    dvp.master_category_names,
+    dvp.is_dmart,
+    -- Usamos CROSS JOIN para desanidar las categorías del front-end. LEFT JOIN para no perder productos que no tengan categoría.
+    cat_name,
+    dip.product_cpg as brand_owner_name,
+    dip.product_brand as product_brand,
+    SUM(dip.total_price_lc) as total,
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip` dip
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+  ON
+    dip.platform_vendor_id = SAFE_CAST(dvp.remote_vendor_id AS STRING) AND dip.sku = dvp.sku
+  LEFT JOIN UNNEST(dvp.category_name) AS cat_name
+  WHERE
+    1=1
+  AND dip.report_period >= DATE_SUB(CURRENT_DATE(), INTERVAL 15 DAY)
+  AND  product_cpg is not null
+  GROUP BY
+    1,2,3,4,5,6,7,8,9
+),
+
+
+cpg_brand_cat_gmv AS (
+  -- GMV por CPG y categoría PIM.
+  SELECT
+    LOWER(brand_owner_name) AS cpg,
+    LOWER(b.product_brand) as product_brand,
+    REGEXP_REPLACE(REGEXP_REPLACE(NORMALIZE(LOWER(b.product_brand), NFD), r'\p{M}', ''), r'[^a-zA-Z0-9ñÑ&]', '') AS product_brand_clean,
+    master_category_names.level_one AS level_one,
+    master_category_names.level_two AS level_two,
+    master_category_names.level_three AS level_three,
+    master_category_names.level_four AS level_four,
+    SUM(total) AS line_gmv,
+  FROM
+    base_orders_data_v2 b
+  WHERE brand_owner_name IS NOT NULL
+  GROUP BY
+    cpg,product_brand,product_brand_clean, level_one, level_two, level_three, level_four
+),
+
+cpg_cat_gmv AS (
+  SELECT
+    cpg,          
+    level_one,
+    level_two,
+    level_three,
+    level_four,
+    SUM(line_gmv) AS line_gmv
+  FROM cpg_brand_cat_gmv
+  GROUP BY 1,2,3,4,5
+),
+
+cpgs_gmv_cat_front AS (
+  -- GMV por CPG y categoría del Front (solo dmarts).
+  SELECT
+    LOWER(brand_owner_name) AS cpg,
+    LOWER(cat_name) AS cat,
+    SUM(total) AS gmv
+  FROM
+    base_orders_data
+  WHERE 
+    brand_owner_name IS NOT NULL 
+    AND is_dmart
+    AND cat_name IS NOT NULL
+  GROUP BY 1, 2
+),
+
+cpg_cat_front AS (
+  -- Ponderación por categoría del Front.
+  SELECT
+    LOWER(brand_owner_name) AS cpg,
+    LOWER(cat_name) AS cat,
+    master_category_names.level_one AS level_one,
+    master_category_names.level_two AS level_two,
+    master_category_names.level_three AS level_three,
+    master_category_names.level_four AS level_four,
+    SUM(total) AS line_gmv,
+    -- ANY_VALUE(gcf.gmv) AS gmv_cpg_cat,
+    -- ROUND(SAFE_DIVIDE(SUM(total), ANY_VALUE(gcf.gmv)), 5) AS cpg_cat_share
+  FROM
+    base_orders_data
+  LEFT JOIN
+    cpgs_gmv_cat_front AS gcf
+    ON LOWER(base_orders_data.brand_owner_name) = gcf.cpg AND LOWER(base_orders_data.cat_name) = gcf.cat
+  WHERE 
+    brand_owner_name IS NOT NULL 
+    AND is_dmart
+    AND cat_name IS NOT NULL
+  GROUP BY
+    cpg, cat, level_one, level_two, level_three, level_four
+  HAVING
+    ROUND(SAFE_DIVIDE(SUM(total), ANY_VALUE(gcf.gmv)), 5) > 0
+),
+
+
+
+-- Limpiamos los nombres de la tabla de performance una sola vez.
+media_performance_cleaned AS (
+  SELECT
+    m.*,
+    -- Creamos los campos limpios aquí para no repetir la lógica en los JOINS
+    REGEXP_REPLACE(REGEXP_REPLACE(NORMALIZE(LOWER(m.campaign_name), NFD), r'\p{M}', ''), r'[^a-zA-Z0-9ñÑ&]', '') AS campaign_name_clean,
+    REGEXP_REPLACE(REGEXP_REPLACE(NORMALIZE(LOWER(m.advertiser_name), NFD), r'\p{M}', ''), r'[^a-zA-Z0-9ñÑ&]', '') AS advertiser_name_clean,
+    cc.cpg,
+    cc.cpg_clean
+  FROM `peya-food-and-groceries.automated_tables_reports.media_performance_argentina_tableau` m
+  LEFT JOIN
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_vw_campaign_cpg` cc
+  ON
+    LOWER(cc.country_name) = LOWER(m.country_name) AND cc.campaign_id = m.campaign_id AND cc.tool_name = m.tool_name 
+  WHERE
+    date_utc >= date_filter
+    AND is_partnership = 1
+    AND m.country_name = 'Argentina'
+),
+
+campaigns_no_product AS (
+  SELECT
+    *
+  FROM  
+    media_performance_cleaned 
+  WHERE
+    product_name is null
+)
+
+
+
+
+,campaign_brands AS (
+  SELECT
+    mpc.* EXCEPT(product_brand),         -- por si lo tuvieses en mpc
+    c_.level_one,
+    c_.level_two,
+    c_.level_three,
+    c_.level_four,
+    c_.line_gmv,
+    c_.product_brand,
+    c_.product_brand_clean,
+    -- total GMV del grupo para ponderar clicks/spend/etc.
+    SUM(c_.line_gmv) OVER (
+      PARTITION BY mpc.date_utc, mpc.tool_name, mpc.campaign_id
+    ) AS group_gmv,
+    TRUE AS is_brand_level
+  FROM 
+    media_performance_cleaned mpc
+  LEFT JOIN
+    cpg_brand_cat_gmv c_
+  ON
+    lower(c_.cpg) = lower(mpc.cpg) AND regexp_contains(mpc.campaign_name_clean, c_.product_brand_clean )
+  WHERE
+    product_name IS NULL
+    
+),
+
+
+campaign_no_brands AS (
+  SELECT
+    cb.* EXCEPT(level_one,level_two,level_three,level_four,line_gmv,product_brand,product_brand_clean,group_gmv,is_brand_level),
+    c_.level_one,
+    c_.level_two,
+    c_.level_three,
+    c_.level_four,
+    c_.line_gmv,
+    CAST(NULL AS STRING) AS product_brand,
+    CAST(NULL AS STRING) AS product_brand_clean,
+    SUM(c_.line_gmv) OVER (
+      PARTITION BY cb.date_utc, cb.tool_name, cb.campaign_id
+      -- si hay multi-país en mpc, agrega: , mpc.country_name
+    ) AS group_gmv,
+    FALSE AS is_brand_level
+  FROM 
+    campaign_brands cb
+  LEFT JOIN
+    cpg_cat_gmv  c_
+  ON
+    lower(c_.cpg) = lower(cb.cpg)
+  WHERE
+    cb.line_gmv is null
+    ),
+
+
+
+
+
+
+data_psearch_bos AS (
+  SELECT
+    day,
+    SAFE_CAST(null AS STRING) AS city_name,
+    tool_name,
+    funnel,
+    campaign_id,
+    campaign_name,
+    advertiser_name,
+    product_cpg,
+    c.category_name,
+    c.product_name,
+    c.vendor_name,
+    c.cpg_clean,
+    c.cpg,
+    cc.product_brand,
+    cc.level_one,
+    cc.level_two,
+    cc.level_three,
+    cc.level_four,
+    MAX(budget_eur) AS budget_eur,
+    MAX(budget_lc) AS budget_lc,
+    DATE_DIFF(MAX(DATE(campaign_end_utc)), MIN(DATE(campaign_start_utc)), DAY) + 1 AS days,
+    SAFE_DIVIDE(MAX(budget_eur), DATE_DIFF(MAX(DATE(campaign_end_utc)), MIN(DATE(campaign_start_utc)), DAY) + 1) AS daily_budget_eur,
+    SAFE_DIVIDE(MAX(budget_lc), DATE_DIFF(MAX(DATE(campaign_end_utc)), MIN(DATE(campaign_start_utc)), DAY) + 1) AS daily_budget_lc,
+    cc.line_gmv,
+    SUM(cc.line_gmv) OVER(PARTITION BY day,campaign_id,tool_name) as gmv_group,
+    SAFE_DIVIDE(MAX(budget_eur), DATE_DIFF(MAX(DATE(campaign_end_utc)), MIN(DATE(campaign_start_utc)), DAY) + 1) * SAFE_DIVIDE(cc.line_gmv,SUM(cc.line_gmv) OVER(PARTITION BY day,campaign_id,tool_name)) AS daily_budget_cat_eur,
+    SAFE_DIVIDE(MAX(budget_lc), DATE_DIFF(MAX(DATE(campaign_end_utc)), MIN(DATE(campaign_start_utc)), DAY) + 1) *SAFE_DIVIDE(cc.line_gmv,SUM(cc.line_gmv) OVER(PARTITION BY day,campaign_id,tool_name)) AS daily_budget_cat_lc,
+    ROUND(SUM(IF(DATE(c.date_utc) = day, clicks_new, 0))
+        * SAFE_DIVIDE(cc.line_gmv, SUM(cc.line_gmv) OVER (PARTITION BY day, campaign_id, tool_name)), 2) AS clicks_new,
+
+  ROUND(SUM(IF(DATE(c.date_utc) = day, impressions_new, 0))
+        * SAFE_DIVIDE(cc.line_gmv, SUM(cc.line_gmv) OVER (PARTITION BY day, campaign_id, tool_name)), 2) AS impressions_new,
+
+  ROUND(SUM(IF(DATE(c.date_utc) = day, viewed_impressions_new, 0))
+        * SAFE_DIVIDE(cc.line_gmv, SUM(cc.line_gmv) OVER (PARTITION BY day, campaign_id, tool_name)), 2) AS viewed_impressions_new,
+
+  SUM(IF(DATE(c.date_utc) = day, revenue_eur, 0))
+        * SAFE_DIVIDE(cc.line_gmv, SUM(cc.line_gmv) OVER (PARTITION BY day, campaign_id, tool_name)) AS revenue_eu,
+
+  SUM(IF(DATE(c.date_utc) = day, revenue_lc, 0))
+        * SAFE_DIVIDE(cc.line_gmv, SUM(cc.line_gmv) OVER (PARTITION BY day, campaign_id, tool_name)) AS revenue_lc
+  FROM
+    media_performance_cleaned AS c
+     ,
+     UNNEST(GENERATE_DATE_ARRAY(DATE(campaign_start_utc), DATE(campaign_end_utc), INTERVAL 1 DAY)) AS day
+  LEFT JOIN
+    cpg_brand_cat_gmv AS cc ON lower(cc.cpg) = lower(c.cpg)
+  WHERE
+    LOWER(tool_name) IN ('pre search', 'banner order status')
+  AND
+    day >= date_filter
+  GROUP BY
+    ALL
+),
+
+data_vb_cb_pb AS (
+  SELECT
+    c.date_utc AS day,
+    dhp.city_name,
+    c.tool_name,
+    c.funnel,
+    c.campaign_id,
+    c.campaign_name,
+    c.advertiser_name,
+    c.product_cpg,
+    cc.product_brand,
+    c.category_name,
+    c.product_name,
+    c.vendor_name,
+    c.cpg_clean,
+    c.cpg,
+    cc.level_one,
+    cc.level_two,
+    cc.level_three,
+    cc.level_four,
+    c.budget_eur,
+    c.budget_lc,
+    c.ad_spend_eur,
+    c.ad_spend_lc,
+    cc.line_gmv,
+    SUM(cc.line_gmv) OVER(PARTITION BY date_utc,city_name,campaign_id,tool_name) as gmv_group,
+    SUM(c.ad_spend_eur) * SAFE_DIVIDE(cc.line_gmv,SUM(cc.line_gmv) OVER(PARTITION BY date_utc,city_name,vendor_name,campaign_id,tool_name)) AS daily_budget_cat_eur,
+    SUM(c.ad_spend_lc) * SAFE_DIVIDE(cc.line_gmv,SUM(cc.line_gmv) OVER(PARTITION BY date_utc,city_name,vendor_name,campaign_id,tool_name)) AS daily_budget_cat_lc,
+    SUM(c.clicks) * SAFE_DIVIDE(cc.line_gmv,SUM(cc.line_gmv) OVER(PARTITION BY date_utc,city_name,vendor_name,campaign_id,tool_name)) AS clicks,
+    SUM(c.impressions) * SAFE_DIVIDE(cc.line_gmv,SUM(cc.line_gmv) OVER(PARTITION BY date_utc,city_name,vendor_name,campaign_id,tool_name)) AS impressions,
+    SUM(c.viewed_impressions) * SAFE_DIVIDE(cc.line_gmv,SUM(cc.line_gmv) OVER(PARTITION BY date_utc,city_name,vendor_name,campaign_id,tool_name)) AS viewed_impressions,
+  FROM
+    media_performance_cleaned AS c
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_historical_partners` AS dhp
+    ON LOWER(dhp.restaurant_name) = LOWER(c.vendor_name) AND dhp.yyyymmdd = c.date_utc AND dhp.yyyymmdd >= '2025-06-01'
+  LEFT JOIN
+    cpg_brand_cat_gmv AS cc ON lower(cc.cpg) = lower(c.cpg)
+  WHERE
+    LOWER(c.tool_name) IN ('vertical banner', 'category banner', 'vendor banner')
+    -- AND c.ad_spend_lc > 0
+    AND
+      c.product_name is null
+    AND c.date_utc >= date_filter
+  GROUP BY
+    ALL
+),
+
+
+data_ks_sp_us AS (
+  -- Nota: El comentario original mencionaba 'Vendor Banner, etc.', pero el filtro es para 'sponsored products, etc.'. He mantenido el filtro.
+  SELECT
+    c.date_utc AS day,
+    dhp.city_name,
+    c.tool_name,
+    c.funnel,
+    c.campaign_id,
+    c.campaign_name,
+    c.advertiser_name,
+    c.product_cpg,
+    c.category_name,
+    c.product_name,
+    pim.brands_name as product_brand,
+    c.vendor_name,
+    c.campaign_name_clean,
+    c.cpg_clean,
+    c.cpg,
+    dvp.level_one,
+    dvp.level_two,
+    dvp.level_three,
+    dvp.level_four,
+    c.budget_eur,
+    c.budget_lc,
+    SUM(c.ad_spend_eur) as ad_spend_eur,
+    SUM(c.ad_spend_lc) as ad_spend_lc,
+    SUM(c.impressions) as impressions,
+    SUM(c.viewed_impressions) as viewed_impressions,
+    SUM(c.clicks) as clicks,
+    SUM(c.revenue_eur) as revenue_eur,
+    SUM(c.revenue_lc) as revenue_lc
+  FROM
+    media_performance_cleaned AS c
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_historical_partners` AS dhp
+    ON LOWER(dhp.restaurant_name) = LOWER(c.vendor_name) AND dhp.yyyymmdd = c.date_utc AND dhp.yyyymmdd >= '2025-06-01'
+  LEFT JOIN
+    -- La cruzo así porque hay productos con mismo nombre y distinta categorizacion, y duplica las lineas
+    (SELECT vendor_name, product_name, MAX(master_code) as master_code, MAX(master_category_names.level_one) as level_one,MAX(master_category_names.level_two) as level_two, MAX(master_category_names.level_three) as level_three, MAX(master_category_names.level_four) as level_four FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` GROUP BY 1,2) AS dvp
+    ON dvp.vendor_name = c.vendor_name AND dvp.product_name = c.product_name
+  LEFT JOIN
+    `peya-data-origins-pro.cl_dmarts.pim_product` AS pim
+    ON pim.product_id = dvp.master_code
+  WHERE
+    LOWER(c.tool_name) IN ('sponsored products', 'keyword search', 'upselling','vertical banner', 'category banner', 'vendor banner')
+    --AND c.ad_spend_lc > 0
+    AND c.product_name is not null
+    AND c.date_utc >= date_filter
+  GROUP BY
+    --1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+    ALL
+)
+
+
+SELECT
+  day,
+  city_name,
+  NULL as latitude,
+  NULL as longitude,
+  tool_name,
+  funnel,
+  campaign_id,
+  campaign_name,
+  product_name,
+  product_brand,
+  vendor_name,
+  cpg_clean,
+  cpg,
+  level_one as master_category_lvl_one,
+  level_two as master_category_lvl_two,
+  level_three as master_category_lvl_three,
+  level_four as master_category_lvl_four,
+  budget_eur,
+  budget_lc,
+  days,
+  daily_budget_eur,
+  daily_budget_lc,
+  --cpg_cat_share,
+  daily_budget_cat_eur as ad_spend_eur,
+  daily_budget_cat_lc as ad_spend_lc,
+  impressions_new as impressions,
+  viewed_impressions_new as viewes_impressions,
+  clicks_new as clicks,
+  revenue_eu as revenue_eur,
+  revenue_lc,
+  CASE
+    WHEN lower(product_brand) = 'dove' THEN 3
+    WHEN lower(product_brand) IN ('tresemmé','sedal') THEN 2.9
+    WHEN lower(product_brand) = 'rexona' THEN 3.6
+    WHEN lower(product_brand) = 'axe' THEN 4.2
+    WHEN lower(product_brand) = 'lux' THEN 5.5
+    WHEN lower(product_brand) = 'skip' THEN 4.2
+    WHEN lower(product_brand) = 'comfort' THEN 3.4
+    WHEN lower(product_brand) = 'ala' THEN 5.5
+    WHEN lower(product_brand) = 'cif' THEN 4.8
+    WHEN lower(product_brand) = "hellmann's" THEN 5.7
+    WHEN lower(product_brand) = "savora" THEN 5.1
+    WHEN lower(product_brand) = "knorr" THEN 4.2
+    ELSE null
+  END as target_roas
+
+FROM
+  data_psearch_bos 
+
+UNION ALL
+
+
+SELECT
+  day,
+  city_name,
+  NULL as latitude,
+  NULL as longitude,
+  tool_name,
+  funnel,
+  campaign_id,
+  campaign_name,
+  product_name,
+  product_brand,
+  vendor_name,
+  cpg_clean,
+  cpg,
+  level_one as master_category_lvl_one,
+  level_two as master_category_lvl_two,
+  level_three as master_category_lvl_three,
+  level_four as master_category_lvl_four,
+  budget_eur,
+  budget_lc,
+  NULL as days, -- No son necesarios para el cálculo
+  NULL daily_budget_eur, -- No se necesita para el cálculo
+  NULL as daily_budget_lc, -- No se necesita para el cálculo
+  --cpg_cat_share,
+  daily_budget_cat_eur as ad_spend_eur,
+  daily_budget_cat_lc as ad_spend_lc,
+  impressions,
+  viewed_impressions,
+  clicks,
+  NULL as revenue_eur,
+  NULL as revenue_lc,
+  CASE
+    WHEN lower(product_brand) = 'dove' THEN 3
+    WHEN lower(product_brand) IN ('tresemmé','sedal') THEN 2.9
+    WHEN lower(product_brand) = 'rexona' THEN 3.6
+    WHEN lower(product_brand) = 'axe' THEN 4.2
+    WHEN lower(product_brand) = 'lux' THEN 5.5
+    WHEN lower(product_brand) = 'skip' THEN 4.2
+    WHEN lower(product_brand) = 'comfort' THEN 3.4
+    WHEN lower(product_brand) = 'ala' THEN 5.5
+    WHEN lower(product_brand) = 'cif' THEN 4.8
+    WHEN lower(product_brand) = "hellmann's" THEN 5.7
+    WHEN lower(product_brand) = "savora" THEN 5.1
+    WHEN lower(product_brand) = "knorr" THEN 4.2
+    ELSE null
+  END as target_roas
+FROM
+  data_vb_cb_pb
+
+
+UNION ALL
+
+SELECT
+  day,
+  d.city_name,
+  city.latitude,
+  city.longitude,
+  tool_name,
+  funnel,
+  campaign_id,
+  campaign_name,
+  product_name,
+  product_brand,
+  vendor_name,
+  cpg_clean,
+  cpg,
+  --campaign_cpg,
+  level_one as master_category_lvl_one,
+  level_two as master_category_lvl_two,
+  level_three as master_category_lvl_three,
+  level_four as master_category_lvl_four,
+  budget_eur,
+  budget_lc,
+  NULL as days, -- No son necesarios para el cálculo
+  NULL daily_budget_eur, -- No se necesita para el cálculo
+  NULL as daily_budget_lc, -- No se necesita para el cálculo
+  --NULL cpg_cat_share,
+  ad_spend_eur,
+  ad_spend_lc,
+  impressions,
+  viewed_impressions,
+  clicks,
+  revenue_eur,
+  revenue_lc,
+  CASE
+    WHEN lower(product_brand) = 'dove' THEN 3
+    WHEN lower(d.product_brand) IN ('tresemmé','sedal') THEN 2.9
+    WHEN lower(d.product_brand) = 'rexona' THEN 3.6
+    WHEN lower(d.product_brand) = 'axe' THEN 4.2
+    WHEN lower(d.product_brand) = 'lux' THEN 5.5
+    WHEN lower(d.product_brand) = 'skip' THEN 4.2
+    WHEN lower(d.product_brand) = 'comfort' THEN 3.4
+    WHEN lower(d.product_brand) = 'ala' THEN 5.5
+    WHEN lower(d.product_brand) = 'cif' THEN 4.8
+    WHEN lower(d.product_brand) = "hellmann's" THEN 5.7
+    WHEN lower(d.product_brand) = "savora" THEN 5.1
+    WHEN lower(d.product_brand) = "knorr" THEN 4.2
+    ELSE null
+  END as target_roas
+FROM
+  data_ks_sp_us d
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_city` city
+ON
+  city.country.country_name = 'Argentina' AND city.city_name = d.city_name
+WHERE
+  campaign_id = '68bb539143fc9ad94f182aa6'
+AND
+  day = '2025-09-06'

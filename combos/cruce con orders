@@ -1,0 +1,41 @@
+WITH
+qc_orders AS (
+  SELECT
+    DATE(qc_orders.order_created_at_lt) AS register_date_lc,
+    qc_orders.order_id,
+    qc_orders.is_dmart,
+    qc_orders.is_successful,
+    -- qc_orders.has_discount_campaign,
+    -- qc_orders.has_brand_campaign,
+    dim_partner.country.country_name,
+    qc_orders.analytical_customer_id,
+    qc_orders.platform_vendor_id AS partner_id,
+    qc_orders.vertical_type,
+    items.value_lc.total_amt_paid_lc as total_price_paid_lc,
+    items.value_euro.total_amt_paid_eur AS total_price_paid_eur,
+    CASE 
+      WHEN CAST(items.quantity_sold AS STRING) LIKE '%.%' THEN 1
+      ELSE items.quantity_sold
+    END AS qty_sold,
+    items.value_lc.total_amt_paid_lc AS total_price_paid_lc,
+    c.* EXCEPT(register_date, partner_id),
+    CONCAT("Combos ",c.brand_name) as combos_brand,
+    COALESCE(p.pct_price*items.value_lc.total_amt_paid_lc,0) as product_price_paid_lc,
+    COALESCE(p.pct_price*items.value_euro.total_amt_paid_eur,0) as product_price_paid_eur
+  FROM `peya-data-origins-pro.cl_dmarts.qc_orders` qc_orders,
+  UNNEST(qc_orders.items) AS items
+  INNER JOIN `peya-bi-tools-pro.il_core.dim_partner` AS dim_partner ON CAST(dim_partner.partner_id AS STRING) = qc_orders.platform_vendor_id
+  INNER JOIN
+    (SELECT
+      * EXCEPT(products),p
+    FROM
+      `peya-food-and-groceries.automated_tables_reports.ms_insights_combos`, UNNEST(products) p) c
+  ON
+    SAFE_CAST(c.partner_id AS STRING) = qc_orders.platform_vendor_id AND items.platform_product_id = SAFE_CAST(c.product_id_combo AS STRING) AND c.register_date = DATE(qc_orders.order_created_at_lt)
+  WHERE qc_orders.order_created_date_lt BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  AND is_successful)
+
+  SELECT
+    *
+  FROM
+    qc_orders

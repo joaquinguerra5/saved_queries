@@ -1,0 +1,79 @@
+WITH combos AS
+(SELECT
+  dvp.remote_vendor_id,
+  dvp.product_name,
+  dvp.master_code,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(product_name), r'[^a-z0-9\s]', '') AS clean_name
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = dvp.remote_vendor_id
+WHERE
+  dp.partner_status = 'ON_LINE'
+AND
+  barcodes IS NULL
+AND
+  REGEXP_CONTAINS(lower(product_name),r"(combo|&|\+)")
+AND
+  dp.country.country_name = 'Chile'
+),
+
+no_combos AS (
+
+SELECT
+  dvp.remote_vendor_id,
+  dvp.product_name,
+  dvp.brand_name,
+  dvp.master_code,
+  `peya-food-and-groceries.automated_tables_reports.gs1_valid`(barcodes)[OFFSET(0)] as ean_valid,
+  --`peya-food-and-groceries.group_catalognv.fnIsEAN`(ltrim(barcodes,"0")) as is_valid_ean,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(product_name), r'[^a-z0-9\s]', '') AS clean_name,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(brand_name), r'[^a-z0-9\s]', '') AS clean_brand
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = dvp.remote_vendor_id
+WHERE
+  dp.partner_status = 'ON_LINE'
+AND
+  barcodes IS NOT NULL
+),
+
+similitud AS
+(SELECT
+  c.remote_vendor_id AS partner_id,
+  c.product_name as nombre_combo,
+  c.master_code as master_combo,
+  nc.product_name as similar_product_name,
+  nc.brand_name,
+  ean_valid,
+  -- is_valid_ean,
+   1 - (EDIT_DISTANCE(c.clean_name, nc.clean_name) / GREATEST(LENGTH(c.clean_name), LENGTH(nc.clean_name))) as similitud_nombre,
+   EDIT_DISTANCE(c.product_name, nc.product_name)
+FROM
+  combos c
+LEFT JOIN
+  no_combos nc
+ON
+  c.remote_vendor_id = nc.remote_vendor_id AND regexp_contains(c.clean_name, nc.clean_brand) AND ean_valid
+)
+
+SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY master_combo ORDER BY similitud_nombre DESC) as rnk_combo
+FROM
+(SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY master_combo,brand_name ORDER BY similitud_nombre DESC) as rnk_brand,
+FROM
+  similitud
+WHERE
+  COALESCE(similitud_nombre,0) > 0)
+WHERE
+  rnk_brand = 1
+AND
+  master_combo = '662fd99c1e34523f665fc097'

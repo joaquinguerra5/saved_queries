@@ -1,0 +1,533 @@
+
+DECLARE date DATE DEFAULT '2024-10-01';
+
+
+--INSERT INTO `peya-food-and-groceries.automated_tables_reports.il_popularity`
+
+WITH
+
+
+base_partners
+AS(
+  SELECT
+    DISTINCT
+    restaurant_id,
+  FROM
+    `peya-bi-tools-pro.il_core.dim_historical_partners` dhp
+  WHERE
+    yyyymmdd = date
+  AND
+    is_online
+  AND
+    business_name NOT IN('Restaurant',
+      'Courier',
+      'Coffee',
+      'Courier Business')
+
+  
+),
+
+user_segmentation AS (
+  SELECT
+    user_id,
+    user_segment
+  FROM
+  `peya-bi-tools-pro.il_qcommerce.fact_user_segmentation_snapshot` 
+  WHERE
+    snapshot_date = date_trunc(date,month)
+),
+
+base
+
+AS (
+  SELECT
+
+      date as day,
+      moment,
+      user_segment,
+      remote_vendor_id as partner_id,
+      dvps.remote_product_id as product_id,
+      dvps.barcodes as barcode,
+      dvps.sku as sku,
+      --LAST_VALUE(dvps.product_name) OVER(PARTITION BY remote_product_id,remote_vendor_id ORDER BY snapshot_date DESC) as product_name,
+      --LAST_VALUE(dvps.category_name) OVER(PARTITION BY remote_product_id,remote_vendor_id ORDER BY snapshot_date DESC) as category_name,
+      --LAST_VALUE(dvps.master_category_names.level_one) OVER(PARTITION BY remote_product_id,remote_vendor_id ORDER BY snapshot_date DESC) as level_one,
+      --LAST_VALUE(dvps.master_category_names.level_two) OVER(PARTITION BY remote_product_id, remote_vendor_id ORDER BY snapshot_date DESC) level_two,
+      dvps.product_name,
+      dvps.master_category_names.level_one,
+      dvps.master_category_names.level_two,
+      dvps.master_category_names.level_three,
+     -- ROW_NUMBER() OVER (PARTITION BY remote_vendor_id,dvps.remote_product_id ORDER BY snapshot_date DESC) as ranking
+
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps,
+  UNNEST(ARRAY['morning','afternoon','night']) as moment,
+  UNNEST(ARRAY['prospect','new','occasional','stable','missing user_id']) as user_segment
+  INNER JOIN
+    base_partners dhp
+  ON
+    dhp.restaurant_id = dvps.remote_vendor_id
+  WHERE
+    dvps.snapshot_date = date
+  AND
+    dvps.product_is_active
+  AND
+    dvps.remote_product_id IS NOT NULL
+  AND
+    dvps.master_category_names.level_one IS NOT NULL
+),
+
+
+
+all_orders AS (
+  SELECT
+      fo.registered_date as day,
+    CASE WHEN extract (hour FROM fo.registered_at) >= 8 and extract (hour FROM fo.registered_at) < 13  THEN 'morning' 
+                 WHEN extract (hour FROM fo.registered_at) >= 13 and extract (hour FROM fo.registered_at) < 19 THEN 'afternoon' 
+                 WHEN extract (hour FROM fo.registered_at) >= 19 and extract (hour FROM fo.registered_at) < 24  THEN 'night'
+                 WHEN extract (hour FROM fo.registered_at) >= 0 and extract (hour FROM fo.registered_at) < 8  THEN 'night'
+                                                                                                         ELSE NULL 
+                                                                                                         END as moment
+    , fo.restaurant.id as partner_id
+    , us.user_segment
+    , d.order_id as order_id
+    , fo.user.id as user_id
+    , d.product.product_id as product_id
+    , d.product.name
+    , b.level_one
+    , b.level_two
+    , d.quantity as quantity_sold
+    , d.total as GPV_LC
+    , SAFE_DIVIDE(d.total,rate_eu) as GPV_EU
+  --  , COUNT(DISTINCT d.order_id) OVER(PARTITION BY fo.restaurant.id,fo.registered_date,us.user_segment) as partner_confirmed_orders
+  --  , COUNT(DISTINCT d.order_id) OVER(PARTITION BY pi.level_one,fo.registered_date,us.user_segment) as l_one_confirmed_orders
+  --  , COUNT(DISTINCT d.order_id) OVER(PARTITION BY pi.level_one,pi.level_two,fo.registered_date,us.user_segment) as l_two_confirmed_orders
+  --  , COUNT(DISTINCT d.order_id) OVER(PARTITION BY fo.restaurant.id,pi.level_one,fo.registered_date,us.user_segment) as partner_l_one_confirmed_orders
+  --  , COUNT(DISTINCT d.order_id) OVER(PARTITION BY fo.restaurant.id,pi.level_one,pi.level_two,fo.registered_date,us.user_segment) as partner_l_two_confirmed_orders
+    
+    -- , CASE WHEN c.campaign_id IS NOT NULL THEN 1 ELSE 0 END as campaign_id
+          
+  FROM `peya-bi-tools-pro.il_core.fact_orders` fo
+  LEFT JOIN UNNEST(details) as d
+
+  LEFT JOIN user_segmentation as us
+    ON  us.user_id = fo.user.id
+
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_currency_exchange` AS dim_currency_exchange
+  ON
+    dim_currency_exchange.currency_exchange_date = DATE_TRUNC(fo.registered_date, month)
+    AND dim_currency_exchange.currency_id = restaurant.country.currency.id
+  LEFT JOIN
+    base b
+  ON
+    b.partner_id = fo.restaurant.id AND b.product_id = d.product.product_id AND b.user_segment = us.user_segment AND b.moment = (CASE WHEN extract (hour FROM fo.registered_at) >= 8 and extract (hour FROM fo.registered_at) < 13  THEN 'morning' 
+                 WHEN extract (hour FROM fo.registered_at) >= 13 and extract (hour FROM fo.registered_at) < 19 THEN 'afternoon' 
+                 WHEN extract (hour FROM fo.registered_at) >= 19 and extract (hour FROM fo.registered_at) < 24  THEN 'night'
+                 WHEN extract (hour FROM fo.registered_at) >= 0 and extract (hour FROM fo.registered_at) < 8  THEN 'night'
+                                                                                                         ELSE NULL END)
+  WHERE DATE(fo.registered_date) = date 
+  AND fo.order_status = "CONFIRMED"
+  AND business_type.business_type_name NOT IN('Restaurant',
+      'Courier',
+      'Coffee',
+      'Courier Business')
+  AND
+    restaurant.id IS NOT NULL
+  --AND
+    --d.product.product_id = 143468436
+  AND d.product.name NOT LIKE '%reconciliation%'
+  AND d.product.section.name NOT LIKE '%reconciliation%'
+),
+
+
+
+orders AS
+(
+SELECT
+    day
+  , partner_id
+  , product_id
+  , level_one
+  , level_two
+  , moment
+  , user_segment
+  , COALESCE(COUNT(DISTINCT order_id),0) as confirmed_orders
+  , ARRAY_AGG(order_id) as order_ids
+  , COALESCE(ROUND(SUM(GPV_LC),0),0) as GPV_LC
+  , COALESCE(ROUND(SUM(GPV_EU),0),0) as GPV_EU
+  , COALESCE(SUM(quantity_sold),0) as units_sold
+  , COALESCE(COUNT(DISTINCT user_id),0) as qty_users
+  , ARRAY_AGG(user_id) as users
+  --, ARRAY_AGG(order_id) as order_ids
+/*  , partner_confirmed_orders
+  , l_one_confirmed_orders
+  , l_two_confirmed_orders
+  , partner_l_one_confirmed_orders
+  , partner_l_two_confirmed_orders*/
+FROM
+  all_orders o
+GROUP BY
+  ALL
+  ),
+
+
+
+
+product_clicked 
+AS (
+  SELECT 
+      date
+    , moment
+  , country_code
+    , partner_id
+    , productSku
+    -- , productName
+    , user_segment
+    , COUNT(DISTINCT sessionId) as product_clicked
+    , CASE WHEN COUNT(DISTINCT user_id) != 0 THEN ARRAY_AGG(DISTINCT user_id) ELSE NULL END as users_product_clicked
+  
+  FROM (
+    SELECT 
+        e.date
+      , e.moment
+      , e.country_code
+      , e.sessionId
+      , e.partner_id
+      , e.productSku
+      -- , e.productName
+      , e.user_id
+      , CASE WHEN e.user_id IS NOT NULL AND us.user_segment IS NOT NULL THEN us.user_segment
+            WHEN e.user_id IS NOT NULL AND us.user_segment IS NULL THEN "prospect"
+            WHEN e.user_id IS NULL AND us.user_segment IS NULL THEN "missing user_id"
+            ELSE NULL END AS user_segment
+      -- , COUNT(*)
+    FROM (
+      SELECT 
+        date
+      , moment
+      , country_code
+      , sessionId
+      , partner_id
+      , productSku
+      -- , productName
+      , MAX(user_id) as user_id
+      
+      FROM (
+        SELECT  
+            DATE(ingestion_timestamp) as date
+          , country_code
+          -- , ingestion_timestamp
+          -- , payload_timestamp_local -- usar este!
+          /*, CASE WHEN extract (hour FROM ingestion_timestamp) >= 8 and extract (hour FROM ingestion_timestamp) < 13  THEN 'morning' 
+                 WHEN extract (hour FROM ingestion_timestamp) >= 13 and extract (hour FROM ingestion_timestamp) < 19 THEN 'afternoon' 
+                 WHEN extract (hour FROM ingestion_timestamp) >= 19 and extract (hour FROM ingestion_timestamp) < 24  THEN 'night'
+                 WHEN extract (hour FROM ingestion_timestamp) >= 0 and extract (hour FROM ingestion_timestamp) < 8  THEN 'night'
+                                                                                                         ELSE NULL 
+                                                                                                         END as moment*/
+          , CASE WHEN extract (hour FROM ingestion_timestamp) BETWEEN 0 AND 2 THEN '0-2' 
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 2 AND 4 THEN '2-4'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 4 AND 6 THEN '4-6'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 6 AND 8 THEN '6-8'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 8 AND 10 THEN '8-10'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 10 AND 12 THEN '10-12'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 12 AND 14 THEN '12-14'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 14 AND 16 THEN '14-16'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 16 AND 18 THEN '16-18'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 18 AND 20 THEN '18-20'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 20 AND 22 THEN '20-22'
+           ELSE '22-24' END as moment 
+          , CONCAT(sessionId,global_entity_id) AS sessionId
+          , userId as user_id
+          , STRING(eventVariablesJson.shopId) as partner_id
+          , CASE WHEN STRING(eventVariablesJson.productSku) IS NOT NULL THEN STRING(eventVariablesJson.productSku) ELSE STRING(eventVariablesJson.productSKU) END AS productSku
+          , STRING(eventVariablesJson.productName) as productName
+
+        FROM (
+          SELECT  
+              e.sessionId
+            , LOWER(e.country) as country_code
+            , e.global_entity_id
+            , e.payload_timestamp_local as ingestion_timestamp -- cual timestamp usar?
+            -- , e.payload_timestamp_local
+            , e.userId
+            , e.eventVariablesJson
+              
+          FROM `peya-data-origins-pro.cl_sessions.perseus_events` e
+
+          INNER JOIN `peya-bi-tools-pro.il_core.dim_partner` as dp
+            ON safe_cast(dp.partner_id as int64) = safe_cast(e.shopId as int64)
+              AND business_type_id not in (1,7,9,11)
+              
+          WHERE partition_date BETWEEN date AND DATE_ADD(date, INTERVAL 1 DAY)
+                  AND eventAction = 'product.clicked'
+                    AND  DATE(e.payload_timestamp_local) = date
+                    -- AND LOWER(STRING(eventVariablesJson.businessType)) IN ('groceries', 'kiosks', 'drinks', 'pharmacy')
+          )
+        )
+      GROUP BY 1,2,3,4,5, 6
+      ) e
+      
+    LEFT JOIN user_segmentation as us
+      ON  SAFE_CAST(us.user_id AS STRING) = SAFE_CAST(e.user_id AS STRING)
+      -- GROUP BY 1,2,3,4,5, 6, 7
+
+  )
+  WHERE partner_id is not null or productSku is not null
+  GROUP BY 1,2,3,4,5, 6
+)
+, 
+add_cart 
+AS (
+  SELECT 
+      date
+    , moment
+  , country_code
+    , partner_id
+    , productSku
+    -- , productName
+    , user_segment
+    , COUNT(DISTINCT sessionId) as add_cart
+    , CASE WHEN COUNT(DISTINCT user_id) != 0 THEN ARRAY_AGG(DISTINCT user_id) ELSE NULL END as users_add_cart
+  
+  FROM (
+    SELECT 
+        e.date
+      , e.moment
+      , e.country_code
+      , e.sessionId
+      , e.partner_id
+      , e.productSku
+      -- , e.productName
+      , e.user_id
+      , CASE WHEN e.user_id IS NOT NULL AND us.user_segment IS NOT NULL THEN us.user_segment
+            WHEN e.user_id IS NOT NULL AND us.user_segment IS NULL THEN "prospect"
+            WHEN e.user_id IS NULL AND us.user_segment IS NULL THEN "missing user_id"
+            ELSE NULL END AS user_segment
+      -- , COUNT(*)
+    FROM (
+      SELECT 
+        date
+      , moment
+      , country_code
+      , sessionId
+      , partner_id
+      , productSku
+      -- , productName
+      , MAX(user_id) as user_id
+      
+      FROM (
+        SELECT  
+            DATE(ingestion_timestamp) as date
+          , country_code
+          -- , ingestion_timestamp
+          -- , payload_timestamp_local -- usar este!
+          /*, CASE WHEN extract (hour FROM ingestion_timestamp) >= 8 and extract (hour FROM ingestion_timestamp) < 13  THEN 'morning' 
+                 WHEN extract (hour FROM ingestion_timestamp) >= 13 and extract (hour FROM ingestion_timestamp) < 19 THEN 'afternoon' 
+                 WHEN extract (hour FROM ingestion_timestamp) >= 19 and extract (hour FROM ingestion_timestamp) < 24  THEN 'night'
+                 WHEN extract (hour FROM ingestion_timestamp) >= 0 and extract (hour FROM ingestion_timestamp) < 8  THEN 'night'
+                                                                                                         ELSE NULL 
+                                                                                                         END as moment*/
+          , CASE WHEN extract (hour FROM ingestion_timestamp) BETWEEN 0 AND 2 THEN '0-2' 
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 2 AND 4 THEN '2-4'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 4 AND 6 THEN '4-6'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 6 AND 8 THEN '6-8'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 8 AND 10 THEN '8-10'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 10 AND 12 THEN '10-12'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 12 AND 14 THEN '12-14'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 14 AND 16 THEN '14-16'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 16 AND 18 THEN '16-18'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 18 AND 20 THEN '18-20'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 20 AND 22 THEN '20-22'
+           ELSE '22-24' END as moment                                                                                               
+          , CONCAT(sessionId,global_entity_id) AS sessionId
+          , userId as user_id
+          , STRING(eventVariablesJson.shopId) as partner_id
+          , CASE WHEN STRING(eventVariablesJson.productSku) IS NOT NULL THEN STRING(eventVariablesJson.productSku) ELSE STRING(eventVariablesJson.productSKU) END AS productSku
+          , STRING(eventVariablesJson.productName) as productName
+
+        FROM (
+          SELECT  
+              e.sessionId
+            , LOWER(e.country) as country_code
+            , e.global_entity_id
+            , e.payload_timestamp_local as ingestion_timestamp -- cual timestamp usar?
+            -- , e.payload_timestamp_local
+            , e.userId
+            , e.eventVariablesJson
+              
+          FROM `peya-data-origins-pro.cl_sessions.perseus_events` e
+
+          INNER JOIN `peya-bi-tools-pro.il_core.dim_partner` as dp
+            ON safe_cast(dp.partner_id as int64) = safe_cast(e.shopId as int64)
+              AND business_type_id not in (1,7,9,11)
+
+          WHERE partition_date BETWEEN date AND DATE_ADD(date, INTERVAL 1 DAY)
+                  AND eventAction = 'add_cart.clicked'
+                    AND  DATE(e.payload_timestamp_local) = date
+                    -- AND LOWER(STRING(eventVariablesJson.businessType)) IN ('groceries', 'kiosks', 'drinks', 'pharmacy')
+          )
+        )
+      GROUP BY 1,2,3,4,5, 6
+      ) e
+      
+    LEFT JOIN  user_segmentation as us
+      ON  SAFE_CAST(us.user_id AS STRING) = SAFE_CAST(e.user_id AS STRING)
+      -- GROUP BY 1,2,3,4,5, 6, 7
+  )
+  WHERE partner_id is not null or productSku is not null
+  GROUP BY 1,2,3,4,5, 6
+)
+,
+any_click 
+AS (
+  SELECT 
+      date
+    , moment
+    , country_code
+    , partner_id
+    , productSku
+    -- , productName
+    , user_segment
+    , COUNT(DISTINCT sessionId) as any_click
+    , CASE WHEN COUNT(DISTINCT user_id) != 0 THEN ARRAY_AGG(DISTINCT user_id) ELSE NULL END as users_any_click
+  
+  FROM (
+    SELECT 
+        e.date
+      , e.moment
+      , e.country_code
+      , e.sessionId
+      , e.partner_id
+      , e.productSku
+      -- , e.productName
+      , e.user_id
+      , CASE WHEN e.user_id IS NOT NULL AND us.user_segment IS NOT NULL THEN us.user_segment
+            WHEN e.user_id IS NOT NULL AND us.user_segment IS NULL THEN "prospect"
+            WHEN e.user_id IS NULL AND us.user_segment IS NULL THEN "missing user_id"
+            ELSE NULL END AS user_segment
+      -- , COUNT(*)
+    FROM (
+      SELECT 
+        date
+      , moment
+      , country_code
+      , sessionId
+      , partner_id
+      , productSku
+      -- , productName
+      , MAX(user_id) as user_id
+      
+      FROM (
+        SELECT  
+            DATE(ingestion_timestamp) as date
+          , country_code
+          /*, CASE WHEN extract (hour FROM ingestion_timestamp) >= 8 and extract (hour FROM ingestion_timestamp) < 13  THEN 'morning' 
+                 WHEN extract (hour FROM ingestion_timestamp) >= 13 and extract (hour FROM ingestion_timestamp) < 19 THEN 'afternoon' 
+                 WHEN extract (hour FROM ingestion_timestamp) >= 19 and extract (hour FROM ingestion_timestamp) < 24  THEN 'night'
+                 WHEN extract (hour FROM ingestion_timestamp) >= 0 and extract (hour FROM ingestion_timestamp) < 8  THEN 'night'
+                                                                                                         ELSE NULL 
+                                                                                                         END as moment*/
+          , CASE WHEN extract (hour FROM ingestion_timestamp) BETWEEN 0 AND 2 THEN '0-2' 
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 2 AND 4 THEN '2-4'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 4 AND 6 THEN '4-6'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 6 AND 8 THEN '6-8'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 8 AND 10 THEN '8-10'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 10 AND 12 THEN '10-12'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 12 AND 14 THEN '12-14'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 14 AND 16 THEN '14-16'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 16 AND 18 THEN '16-18'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 18 AND 20 THEN '18-20'
+           WHEN extract (hour FROM ingestion_timestamp) BETWEEN 20 AND 22 THEN '20-22'
+           ELSE '22-24' END as moment                                                                                                  
+          , CONCAT(sessionId,global_entity_id) AS sessionId
+          , userId as user_id
+          , STRING(eventVariablesJson.shopId) as partner_id
+          , CASE WHEN STRING(eventVariablesJson.productSku) IS NOT NULL THEN STRING(eventVariablesJson.productSku) ELSE STRING(eventVariablesJson.productSKU) END AS productSku
+          , STRING(eventVariablesJson.productName) as productName
+
+        FROM (
+          SELECT  
+              e.sessionId
+            , LOWER(e.country) as country_code
+            , e.global_entity_id
+            , e.payload_timestamp_local as ingestion_timestamp 
+            , e.userId
+            , e.eventVariablesJson
+              
+          FROM `peya-data-origins-pro.cl_sessions.perseus_events` e
+
+          INNER JOIN `peya-bi-tools-pro.il_core.dim_partner` as dp
+            ON safe_cast(dp.partner_id as int64) = safe_cast(e.shopId as int64)
+              AND business_type_id not in (1,7,9,11)
+          
+          WHERE partition_date BETWEEN date AND DATE_ADD(date, INTERVAL 1 DAY)
+                  AND eventAction in ('add_cart.clicked', "product.clicked")
+                    AND  DATE(e.payload_timestamp_local) = date                 
+                    -- AND LOWER(STRING(eventVariablesJson.businessType)) IN ('groceries', 'kiosks', 'drinks', 'pharmacy')
+          )
+        )
+      GROUP BY 1,2,3,4,5, 6
+      ) e
+      
+    LEFT JOIN user_segmentation as us
+      ON  SAFE_CAST(us.user_id AS STRING) = SAFE_CAST(e.user_id AS STRING)
+      -- GROUP BY 1,2,3,4,5, 6, 7
+  )
+  WHERE partner_id is not null or productSku is not null
+  GROUP BY 1,2,3,4,5, 6
+),
+
+
+events_info AS
+(
+  SELECT
+  ac.*,
+  pc.product_clicked,
+  pc.users_product_clicked,
+  adc.add_cart,
+  adc.users_add_cart
+FROM
+  any_click ac
+LEFT JOIN
+  product_clicked pc
+ON
+  ac.date = pc.date AND ac.moment = pc.moment AND ac.partner_id = pc.partner_id AND ac.productSku = pc.productSku AND ac.user_segment = pc.user_segment
+LEFT JOIN
+  add_cart adc
+ON
+  ac.date = adc.date AND ac.moment = adc.moment AND ac.partner_id = adc.partner_id AND ac.productSku = adc.productSku AND ac.user_segment = adc.user_segment
+)
+
+
+
+SELECT
+    b.*
+  , COALESCE(o.confirmed_orders) confirmed_orders
+  , COALESCE(o.order_ids) order_ids
+  , COALESCE(o.GPV_LC) GPV_LC
+  , COALESCE(o.GPV_EU) GPV_EU
+  , COALESCE(o.units_sold) units_sold
+  , COALESCE(o.qty_users) qty_users
+  , COALESCE(o.users) users
+  , COALESCE(e.product_clicked) product_clicked
+  , COALESCE(e.add_cart) add_cart
+  , COALESCE(e.any_click) any_click
+  , COALESCE(e.users_product_clicked) as users_product_clicked
+  , COALESCE(e.users_add_cart) as users_add_cart
+  , COALESCE(e.users_any_click) as users_any_click
+FROM
+  base b
+LEFT JOIN
+  orders o
+ON
+  /*b.day = o.day AND  */b.partner_id = o.partner_id AND b.product_id = o.product_id AND b.user_segment = o.user_segment AND b.moment = o.moment
+LEFT JOIN
+  events_info e
+ON
+  /*b.day = e.date AND */SAFE_CAST(b.partner_id AS STRING) = e.partner_id AND SAFE_CAST(b.product_id AS STRING) = e.productSku AND b.user_segment = e.user_segment AND b.moment = e.moment
+/*WHERE
+  b.partner_id = 285567
+AND
+  b.product_id = 62427539*/
+

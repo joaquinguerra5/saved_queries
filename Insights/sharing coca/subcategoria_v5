@@ -10,7 +10,6 @@ SET date_filter = CURRENT_DATE();
 SET categories = ['beverages'];
 SET sub_categories = ['juice / ice tea / sports / energy','soft drinks / mixers','water','pre-mixed','spirits','milk','ice cream / desserts'];
 
-
 WITH base AS (
 SELECT
   report_period AS report_period,
@@ -31,10 +30,10 @@ SELECT
       product_cpg = CPG_filter 
     AND 
       LOWER(master_category_lvl_two) in UNNEST(sub_categories) 
-    AND 
-      lower(master_category_lvl_one) NOT IN ('packaged foods','frozen','bws') 
-    AND  
-      product_brand != 'Monster' 
+    -- AND 
+    --   lower(master_category_lvl_one) NOT IN ('packaged foods','frozen','bws') 
+    -- AND  
+    --   product_brand != 'Monster' 
     THEN TRUE
     ELSE FALSE
   END as is_target_sale,
@@ -49,40 +48,51 @@ FROM
   `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip`
 WHERE country_name IN UNNEST(country_filter)
 AND report_period BETWEEN DATE_TRUNC(DATE_SUB(date_filter, INTERVAL 1 WEEK), MONTH) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
+AND
+  lower(master_category_lvl_two) IN UNNEST(sub_categories)
 )
 
 
 
--- info Mensual
+-- info QC
 SELECT 
   'Mensual' AS apertura_informacion,
   DATE_TRUNC(c.report_period, MONTH) AS periodo,
   c.country_name,
-  COUNT(DISTINCT CASE WHEN is_target_sale THEN orders END) as orders_cpg,
-  SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END) AS gmv_lc_cpg,
+  c.city_name,
+  c.categoria,
+  c.subcategoria,
+  COUNT(DISTINCT CASE WHEN is_target_sale THEN orders ELSE NULL END) AS orders_cpg,
+  COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg,
   SUM(CASE WHEN is_target_sale THEN quantity END) as unidades,
   SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN is_target_sale THEN orders  ELSE NULL END) , COUNT(DISTINCT orders)) AS incidencia,
-  SAFE_DIVIDE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END), SUM(gmv_lc)) AS share,
+  SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001), SUM(gmv_lc)) AS share,
+  COALESCE(SUM(CASE WHEN is_target_sale AND clasificacion = 'nartd' THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg_nartd,
+  SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale AND clasificacion = 'nartd' THEN gmv_lc ELSE NULL END),0.00001), SUM(gmv_lc)) AS share_nartd
 FROM base c 
-GROUP BY 
-  1,2,3
+GROUP BY ALL
+--HAVING orders_cpg > 0
 
 
 UNION ALL
 
 
--- info Diaria
 SELECT 
   'Diaria' AS apertura_informacion,
   c.report_period AS periodo,
   c.country_name,
-  COUNT(DISTINCT CASE WHEN is_target_sale THEN orders END) as orders_cpg,
-  SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END) AS gmv_lc_cpg,
+  c.city_name,
+  c.categoria,
+  c.subcategoria,
+  COUNT(DISTINCT CASE WHEN is_target_sale THEN orders ELSE NULL END) AS orders_cpg,
+  COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg,
   SUM(CASE WHEN is_target_sale THEN quantity END) as unidades,
-  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN is_target_sale THEN orders  ELSE NULL END) , COUNT(DISTINCT orders)) incidencia_,
-  SAFE_DIVIDE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END), SUM(gmv_lc)) AS share,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN is_target_sale THEN orders  ELSE NULL END) , COUNT(DISTINCT orders)) AS incidencia,
+  SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001), SUM(gmv_lc)) AS share,
+  COALESCE(SUM(CASE WHEN is_target_sale AND clasificacion = 'nartd' THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg_nartd,
+  SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale AND clasificacion = 'nartd' THEN gmv_lc ELSE NULL END),0.00001), SUM(gmv_lc)) AS share_nartd
 FROM base c 
 WHERE 
   c.report_period BETWEEN DATE_SUB(date_filter, INTERVAL 7 DAY) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
-GROUP BY 
-  1,2,3
+GROUP BY ALL
+--HAVING orders_cpg > 0

@@ -1,15 +1,14 @@
 DECLARE country_filter ARRAY<STRING>;
 DECLARE CPG_filter STRING;
 DECLARE date_filter DATE;
-DECLARE categories ARRAY<STRING>;
 DECLARE sub_categories ARRAY<STRING>;
+DECLARE nartd_l3 ARRAY<STRING>;
 
 SET country_filter = ['Argentina', 'Uruguay', 'Chile', 'Perú', 'Bolivia', 'Costa Rica', 'Guatemala','Panama','Ecuador','Dominican Republic'];
 SET CPG_filter = 'Coca Cola';
--- SET date_filter = date_filter
 SET date_filter = CURRENT_DATE();
-SET categories = ['beverages'];
-SET sub_categories = ['juice / ice tea / sports / energy','soft drinks / mixers','water','pre-mixed','spirits','milk','ice cream / desserts'];
+SET sub_categories = ['juice / ice tea / sports / energy','soft drinks / mixers','water','pre-mixed','ice cream / desserts'];
+SET nartd_l3 = ['ice tea / canned tea','juice','sports','diet','regular','soft drinks','flavoured','sparkling','still'];
 
 WITH base AS (
 SELECT
@@ -29,12 +28,6 @@ SELECT
   CASE 
     WHEN 
       product_cpg = CPG_filter 
-    AND 
-      LOWER(master_category_lvl_two) in UNNEST(sub_categories) 
-    -- AND 
-    --   lower(master_category_lvl_one) NOT IN ('packaged foods','frozen','bws') 
-    -- AND  
-    --   product_brand != 'Monster' 
     THEN TRUE
     ELSE FALSE
   END as is_target_sale,
@@ -51,6 +44,10 @@ WHERE country_name IN UNNEST(country_filter)
 AND report_period BETWEEN DATE_TRUNC(DATE_SUB(date_filter, INTERVAL 1 WEEK), MONTH) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
 AND
   lower(master_category_lvl_two) IN UNNEST(sub_categories)
+AND
+  quantity > 0
+AND
+  total_price_lc > 0
 ),
 
 

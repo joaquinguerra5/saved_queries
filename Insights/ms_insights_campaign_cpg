@@ -1,0 +1,207 @@
+DECLARE date_filter DATE DEFAULT '2025-01-01';
+
+
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_campaign_cpg`
+
+AS
+
+WITH products AS
+(
+
+-- Listado de vendor products con CPG segun pim + exception list  
+SELECT
+  DISTINCT
+    dvp.remote_vendor_id as partner_id,
+    dvp.vendor_name,
+    dvp.product_name,
+    COALESCE(sel.correct_product_cpg, el.correct_product_cpg, pim.brand_owner_name) AS product_cpg,
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  pim.product_id = dvp.master_code
+
+LEFT JOIN `peya-data-origins-pro.cl_qcommerce.cpg_brand_mapping_exceptional_list` AS el
+ON dvp.global_entity_id = el.global_entity_id
+AND COALESCE(pim.brand_owner_name, 'Others') = el.product_cpg
+AND COALESCE(INITCAP(pim.brands_name), INITCAP(dvp.brand_name), 'Others') = el.product_brand
+
+LEFT JOIN `peya-data-origins-pro.cl_qcommerce.cpg_barcode_mapping_exceptional_list` AS sel
+ON dvp.global_entity_id = sel.global_entity_id
+AND COALESCE(el.correct_product_cpg, pim.brand_owner_name, 'Others') = sel.product_cpg
+AND COALESCE(INITCAP(pim.brand_owner_name), INITCAP(dvp.brand_name), 'Others') = sel.product_brand
+AND ltrim(dvp.barcodes,"0") = ltrim(sel.barcode,"0")
+),
+
+
+cpgs_country AS (
+  SELECT
+    --DISTINCT
+    p.product_cpg as cpg,
+    dp.country.country_code as cc,
+    dp.country.country_name as country_name,
+    REGEXP_REPLACE(
+      REGEXP_REPLACE(NORMALIZE(LOWER(p.product_cpg), NFD), r'\p{M}', ''),
+      r'[^a-zA-Z0-9ñÑ&]',
+      ''
+    ) AS cpg_clean,
+    COUNT(distinct CONCAT(p.partner_id,p.product_name)) as cant_products,
+  FROM
+    products p
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_partner` dp
+  ON
+    dp.partner_id = p.partner_id
+  WHERE
+    p.product_cpg is not null
+  GROUP BY
+    ALL
+),
+
+campaigns_info AS
+(SELECT
+  DISTINCT
+  country_name,
+  campaign_id,
+  campaign_name,
+  component_name,
+  advertiser_name,
+  product_cpg,
+  tool_name,
+  vendor_name,
+  product_name,
+  REGEXP_REPLACE(
+      REGEXP_REPLACE(NORMALIZE(LOWER(campaign_name), NFD), r'\p{M}', ''),
+      r'[^a-zA-Z0-9ñÑ&]',
+      ''
+    ) AS campaign_name_clean,
+  REGEXP_REPLACE(
+      REGEXP_REPLACE(NORMALIZE(LOWER(advertiser_name), NFD), r'\p{M}', ''),
+      r'[^a-zA-Z0-9ñÑ&]',
+      ''
+    ) AS advertiser_name_clean,
+FROM
+  `peya-datamarts-pro.dm_retailmedia.user_media_performance` media
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.ms_insights_mvw_campaigns_with_cpg` prev_asignadas
+USING(campaign_id,campaign_name,tool_name,country_name)
+WHERE
+  date_utc >= date_filter
+AND
+  DATE(campaign_start_utc) >= date_filter
+AND
+  is_partnership = 1
+AND
+  prev_asignadas.campaign_id IS NULL --SOLAMENTE TRAEMOS LAS QUE NO FUERON ASIGNADAS
+),
+
+-- SELECT
+--   *
+-- FROM
+--   campaigns_info
+-- WHERE
+--   campaign_id = '685c0f5b3a0071b74aa06bf1'
+
+
+campaigns_without_product_name AS (
+SELECT
+  DISTINCT
+  ci.country_name,
+  ci.campaign_id,
+  ci.campaign_name,
+  ci.tool_name,
+  ci.campaign_name_clean,
+  ci.advertiser_name_clean,
+  COALESCE(cc1.cpg,cc2.cpg) as cpg,
+  COALESCE(cc1.cpg_clean,cc2.cpg_clean) as cpg_clean,
+  COALESCE(cc1.cant_products,cc2.cant_products) as cant_products
+FROM
+  campaigns_info ci
+LEFT JOIN
+  cpgs_country cc1
+ON
+  REGEXP_CONTAINS(ci.campaign_name_clean, cc1.cpg_clean) AND lower(ci.country_name) = lower(cc1.country_name)
+LEFT JOIN
+  cpgs_country cc2
+ON
+  REGEXP_CONTAINS(ci.advertiser_name_clean, cc2.cpg_clean) AND lower(ci.country_name) = lower(cc2.country_name)
+WHERE
+--  lower(tool_name) IN ('sponsored products', 'keyword search', 'upselling')
+--AND
+  product_name IS NULL
+),
+
+
+
+campaigns_with_product_name AS 
+(
+SELECT
+  media.country_name,
+  media.campaign_id,
+  media.campaign_name,
+  tool_name,
+  CASE
+    WHEN p.product_cpg = 'Others' THEN NULL
+    ELSE p.product_cpg
+  END
+     as cpg,
+  CASE
+    WHEN p.product_cpg = 'Others' THEN NULL
+    ELSE
+      REGEXP_REPLACE(
+          REGEXP_REPLACE(NORMALIZE(LOWER(p.product_cpg), NFD), r'\p{M}', ''),
+          r'[^a-zA-Z0-9ñÑ&]',
+          ''
+        )
+  END AS cpg_clean,
+  COUNT(DISTINCT p.product_name) as cant_lineas,
+FROM
+  campaigns_info media
+LEFT JOIN
+  products p
+ON
+  media.vendor_name = p.vendor_name AND media.product_name = p.product_name
+WHERE
+--  lower(tool_name) IN ('sponsored products', 'keyword search', 'upselling')
+--AND
+  media.product_name IS NOT NULL
+GROUP BY
+  1,2,3,4,5,6
+
+  ),
+
+rn_with_product_name as (
+  SELECT
+    * EXCEPT(cant_lineas),
+    ROW_NUMBER() OVER(PARTITION BY country_name,campaign_id, campaign_name, tool_name ORDER BY cant_lineas DESC, cpg) as rn
+  FROM
+    campaigns_with_product_name
+),
+
+
+
+rn_without_product_name as (
+  SELECT
+    * EXCEPT(cant_products),
+    ROW_NUMBER() OVER(PARTITION BY country_name,campaign_id, campaign_name, tool_name ORDER BY cant_products DESC, cpg) as rn
+  FROM
+    campaigns_without_product_name
+)
+
+
+
+SELECT
+  COALESCE(wp.country_name,wop.country_name) as country_name,
+  COALESCE(wp.campaign_id,wop.campaign_id) as campaign_id,
+  COALESCE(wp.campaign_name,wop.campaign_name) as campaign_name,
+  COALESCE(wp.tool_name,wop.tool_name) as tool_name,
+  COALESCE(wp.cpg,wop.cpg) as cpg,
+  COALESCE(wp.cpg_clean,wop.cpg_clean) as cpg_clean
+FROM
+  (SELECT * FROM rn_with_product_name WHERE rn = 1 AND cpg is not null) wp
+FULL JOIN
+  (SELECT * FROM rn_without_product_name WHERE rn = 1 AND cpg is not null) wop
+ON
+  wp.campaign_id = wop.campaign_id AND wp.tool_name = wop.tool_name AND wp.campaign_name = wop.campaign_name

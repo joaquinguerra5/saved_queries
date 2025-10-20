@@ -1,0 +1,170 @@
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_combos`
+
+-- PARTITION BY
+--   register_date
+
+-- CLUSTER BY
+--   partner_id,master_code_combo
+
+-- AS
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_combos`
+
+
+WITH combos AS
+(SELECT
+  dvp.snapshot_date,
+  dvp.remote_vendor_id,
+  dvp.remote_product_id,
+  dvp.product_name,
+  dvp.master_code,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(product_name), r'[^a-z0-9]', '') AS clean_name
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvp
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = dvp.remote_vendor_id
+WHERE
+  dvp.snapshot_date >= DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY)
+  -- dvp.snapshot_date >= '2025-01-01'
+AND
+  dp.partner_status = 'ON_LINE'
+AND
+  barcodes IS NULL
+AND
+  REGEXP_CONTAINS(lower(product_name),r"(combo|promo|&|\+)")
+-- AND
+--   dp.country.country_name = 'Chile'
+AND
+  status = 'ACTIVE'
+-- AND
+--   partner_id = 62292
+),
+
+no_combos AS (
+
+SELECT
+  dvp.snapshot_date,
+  dvp.remote_vendor_id,
+  dvp.barcodes,
+  dvp.product_name,
+  dvp.remote_product_id,
+  dvp.sku,
+  dvp.master_code,
+  CASE
+    WHEN dvp.barcodes IS NULL THEN 'Hielo'
+    ELSE brand_name
+  END as brand_name,
+  pim.brand_owner_name,
+  dvp.master_category_names.level_one,
+  dvp.master_category_names.level_two,
+  dvp.master_category_names.level_three,
+  `peya-food-and-groceries.automated_tables_reports.gs1_valid`(barcodes)[OFFSET(0)] as ean_valid,
+  --`peya-food-and-groceries.group_catalognv.fnIsEAN`(ltrim(barcodes,"0")) as is_valid_ean,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(dvp.product_name), r'[^a-z0-9]', '') AS clean_name,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(IF(brand_name = 'Unbranded','Hielo',brand_name)), r'[^a-z0-9]', '') AS clean_brand,
+  dvp.catalog_price_lc as price
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvp
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = dvp.remote_vendor_id
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  pim.product_id = dvp.master_code
+WHERE
+  dvp.snapshot_date >= DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY)
+  -- dvp.snapshot_date >= '2025-01-01'
+AND
+  dp.partner_status = 'ON_LINE'
+AND
+  NOT REGEXP_CONTAINS(lower(dvp.product_name),r"(combo|&|\+)")
+AND
+  ((barcodes IS NOT NULL AND brand_name != 'Unbranded') OR (REGEXP_CONTAINS(lower(dvp.product_name),'hielo')))
+AND
+  status = 'ACTIVE'
+),
+
+similitud AS
+(SELECT
+  c.snapshot_date,
+  c.remote_vendor_id AS partner_id,
+  c.product_name as product_name_combo,
+  c.clean_name as clean_product_name_combo,
+  c.master_code as master_code_combo,
+  c.remote_product_id as product_id_combo,
+  nc.product_name as product_name_individual,
+  nc.brand_name brand_name_individual,
+  nc.remote_product_id product_id_individual,
+  nc.sku sku_individual,
+  nc.barcodes as barcodes_individual,
+  nc.master_code master_code_individual,
+  brand_owner_name brand_owner_name_individual,
+  nc.level_one,
+  nc.level_two,
+  nc.level_three,
+  ean_valid,
+  -- is_valid_ean,
+  nc.clean_brand,
+   1 - (EDIT_DISTANCE(c.clean_name, nc.clean_name) / GREATEST(LENGTH(c.clean_name), LENGTH(nc.clean_name))) as similitud_nombre,
+  nc.price,
+FROM
+  combos c 
+LEFT JOIN
+  no_combos nc
+ON
+  c.remote_vendor_id = nc.remote_vendor_id AND ean_valid AND regexp_contains(c.clean_name, nc.clean_brand) AND c.snapshot_date = nc.snapshot_date
+
+),
+
+combos_final AS 
+(SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY snapshot_date,partner_id,master_code_combo ORDER BY similitud_nombre DESC) as rnk_combo,
+  SUM(price) OVER(PARTITION BY snapshot_date,partner_id, master_code_combo) as total_price,
+  SAFE_DIVIDE(price,SUM(price) OVER(PARTITION BY snapshot_date,partner_id, master_code_combo)) as pct_price
+FROM
+(SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY snapshot_date,partner_id,master_code_combo,brand_name_individual ORDER BY similitud_nombre DESC) as rnk_brand,
+FROM
+  similitud
+WHERE
+  COALESCE(similitud_nombre,0) > 0)
+WHERE
+  rnk_brand = 1)
+
+SELECT
+  cf.snapshot_date as register_date
+  , cf.partner_id
+  , cf.product_id_combo
+  , cf.product_name_combo
+  --, cf.clean_product_name_combo
+  , cf.master_code_combo
+  , ARRAY_AGG(STRUCT(
+    cf.master_code_individual as master_code,
+    cf.product_id_individual as product_id,
+    cf.sku_individual as sku,
+    cf.barcodes_individual as barcode,
+    cf.product_name_individual as product_name,
+    cf.brand_name_individual as brand_name,
+    cf.brand_owner_name_individual as brand_owner_name,
+    cf.level_one,
+    cf.level_two,
+    cf.level_three,
+    cf.similitud_nombre,
+    cf.price as price_product,
+    cf.total_price as price_total_products_combo,
+    cf.pct_price as pct_price
+  )) as products
+FROM
+  combos_final cf
+-- WHERE
+--   master_code_combo = 'CAT_224902_4efe9f78e0748'
+-- AND
+--   partner_id = 339173
+GROUP BY
+  ALL

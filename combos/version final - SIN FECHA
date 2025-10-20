@@ -1,0 +1,166 @@
+WITH
+  qc_catalog_products AS (
+  SELECT
+    vp.platform_vendor_id AS partner_id,
+    vp.platform_product_id AS product_id,
+    qc.product_name,
+    qc.pim_product_id as master_code,
+    b.barcode,
+    REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(qc.product_name), r'[^a-z0-9]', '') AS clean_name,
+    c.master_category_names.level_one,
+    c.master_category_names.level_two,
+    c.master_category_names.level_three,
+    sku,
+    brand_name,
+    pim.brand_owner_name,
+    vp.catalog_price_lc as price
+  FROM
+    `peya-data-origins-pro.cl_dmarts.qc_catalog_products` AS qc
+  LEFT JOIN
+    UNNEST(barcodes) AS b,
+    UNNEST(vendor_products) AS vp,
+    UNNEST(master_categories) AS c
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_partner` dp
+  ON
+    SAFE_CAST(dp.partner_id AS STRING) = vp.platform_vendor_id
+  LEFT JOIN
+    `peya-data-origins-pro.cl_dmarts.pim_product` pim
+  ON
+  pim.product_id = qc.pim_product_id
+  WHERE
+    dp.partner_status = 'ON_LINE'
+  QUALIFY
+    ROW_NUMBER() OVER latest_chain = 1
+  WINDOW
+    latest_chain AS (
+    PARTITION BY
+      qc.global_entity_id,
+      qc.sku,
+      vp.warehouse_id,
+      vp.platform_vendor_id
+    ORDER BY
+      qc.chain_product_created_at_utc DESC
+    NULLS LAST
+      ) ),
+
+combos AS (
+  SELECT
+    partner_id,
+    product_id,
+    product_name,
+    master_code,
+    clean_name,
+  FROM
+    qc_catalog_products
+  WHERE
+    REGEXP_CONTAINS(lower(product_name),r"(combo|promo|&|\+)")
+  AND
+    barcode IS NULL
+),
+
+no_combos AS (
+  SELECT
+    partner_id,
+    product_id,
+    barcode,
+    sku,
+    product_name,
+    master_code,
+    clean_name,
+    CASE
+    WHEN barcode IS NULL THEN 'Hielo'
+    ELSE brand_name
+  END as brand_name,
+  brand_owner_name,
+  level_one,
+  level_two,
+  level_three,
+  `peya-food-and-groceries.automated_tables_reports.gs1_valid`(barcode)[OFFSET(0)] as ean_valid,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(IF(brand_name = 'Unbranded','Hielo',brand_name)), r'[^a-z0-9]', '') AS clean_brand,
+  price
+  FROM
+    qc_catalog_products
+  WHERE
+    NOT REGEXP_CONTAINS(lower(product_name),r"(combo|promo|&|\+)")
+  AND
+    ((barcode IS NOT NULL AND brand_name != 'Unbranded') OR (REGEXP_CONTAINS(lower(product_name),'hielo')))
+),
+
+similitud AS
+(SELECT
+  c.partner_id AS partner_id,
+  c.product_name as product_name_combo,
+  c.clean_name as clean_product_name_combo,
+  c.master_code as master_code_combo,
+  c.product_id as product_id_combo,
+  nc.product_name as product_name_individual,
+  nc.brand_name as  brand_name_individual,
+  nc.product_id as  product_id_individual,
+  nc.sku as  sku_individual,
+  nc.barcode as barcodes_individual,
+  nc.master_code as  master_code_individual,
+  brand_owner_name as  brand_owner_name_individual,
+  nc.level_one,
+  nc.level_two,
+  nc.level_three,
+  ean_valid,
+  -- is_valid_ean,
+  nc.clean_brand,
+   1 - (EDIT_DISTANCE(c.clean_name, nc.clean_name) / GREATEST(LENGTH(c.clean_name), LENGTH(nc.clean_name))) as similitud_nombre,
+  nc.price,
+FROM
+  combos c 
+LEFT JOIN
+  no_combos nc
+ON
+  c.partner_id = nc.partner_id AND ean_valid AND regexp_contains(c.clean_name, nc.clean_brand)
+
+),
+
+combos_final AS 
+(SELECT
+  *,
+  --ROW_NUMBER() OVER(PARTITION BY partner_id,master_code_combo ORDER BY similitud_nombre DESC) as rnk_combo,
+   SUM(price) OVER(PARTITION BY partner_id, master_code_combo) as total_price,
+   SAFE_DIVIDE(price,SUM(price) OVER(PARTITION BY partner_id, master_code_combo)) as pct_price
+FROM
+(SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY partner_id,master_code_combo,brand_name_individual ORDER BY similitud_nombre DESC) as rnk_brand,
+FROM
+  similitud
+WHERE
+  COALESCE(similitud_nombre,0) > 0)
+WHERE
+  rnk_brand = 1)
+
+SELECT
+  partner_id
+  , product_id_combo
+  , product_name_combo
+  , master_code_combo
+  , ARRAY_AGG(STRUCT(
+    master_code_individual as master_code,
+    product_id_individual as product_id,
+    sku_individual as sku,
+    barcodes_individual as barcode,
+    product_name_individual as product_name,
+    brand_name_individual as brand_name,
+    brand_owner_name_individual as brand_owner,
+    level_one,
+    level_two,
+    level_three,
+    similitud_nombre,
+    price as price_product,
+    total_price as price_total_products_combo,
+    pct_price
+  )) product
+FROM
+  combos_final
+WHERE
+  --master_code_combo = 'CAT_224902_4efe9f78e0748'
+--AND
+  partner_id = '339173'
+GROUP BY
+  ALL

@@ -1,0 +1,121 @@
+WITH combos AS
+(SELECT
+  dvp.remote_vendor_id,
+  dvp.remote_product_id,
+  dvp.product_name,
+  dvp.master_code,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(product_name), r'[^a-z0-9]', '') AS clean_name
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = dvp.remote_vendor_id
+WHERE
+  dp.partner_status = 'ON_LINE'
+AND
+  barcodes IS NULL
+AND
+  REGEXP_CONTAINS(lower(product_name),r"(combo|promo|&|\+)")
+AND
+  dp.country.country_name = 'Chile'
+AND
+  status = 'ACTIVE'
+-- AND
+--   partner_id = 62292
+),
+
+no_combos AS (
+
+SELECT
+  dvp.remote_vendor_id,
+  dvp.product_name,
+  CASE
+    WHEN dvp.barcodes IS NULL THEN 'Hielo'
+    ELSE brand_name
+  END as brand_name,
+  dvp.master_code,
+  pim.brand_owner_name,
+  `peya-food-and-groceries.automated_tables_reports.gs1_valid`(barcodes)[OFFSET(0)] as ean_valid,
+  --`peya-food-and-groceries.group_catalognv.fnIsEAN`(ltrim(barcodes,"0")) as is_valid_ean,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(dvp.product_name), r'[^a-z0-9]', '') AS clean_name,
+  REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD(IF(brand_name = 'Unbranded','Hielo',brand_name)), r'[^a-z0-9]', '') AS clean_brand,
+  dvp.catalog_price_lc as price
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = dvp.remote_vendor_id
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  pim.product_id = dvp.master_code
+WHERE
+  dp.partner_status = 'ON_LINE'
+AND
+  NOT REGEXP_CONTAINS(lower(dvp.product_name),r"(combo|&|\+)")
+AND
+  ((barcodes IS NOT NULL AND brand_name != 'Unbranded') OR (REGEXP_CONTAINS(lower(dvp.product_name),'hielo')))
+AND
+  status = 'ACTIVE'
+),
+
+similitud AS
+(SELECT
+  c.remote_vendor_id AS partner_id,
+  c.product_name as nombre_combo,
+  c.master_code as master_combo,
+  c.remote_product_id as product_id,
+  nc.product_name as similar_product_name,
+  nc.brand_name,
+  brand_owner_name,
+  ean_valid,
+  -- is_valid_ean,
+  c.clean_name,
+  nc.clean_brand,
+   1 - (EDIT_DISTANCE(c.clean_name, nc.clean_name) / GREATEST(LENGTH(c.clean_name), LENGTH(nc.clean_name))) as similitud_nombre,
+  nc.price,
+FROM
+  combos c 
+LEFT JOIN
+  no_combos nc
+ON
+  c.remote_vendor_id = nc.remote_vendor_id AND ean_valid AND regexp_contains(c.clean_name, nc.clean_brand)
+
+),
+
+combos_final AS 
+(SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY partner_id,master_combo ORDER BY similitud_nombre DESC) as rnk_combo,
+  SUM(price) OVER(PARTITION BY partner_id, master_combo) as total_price,
+  SAFE_DIVIDE(price,SUM(price) OVER(PARTITION BY partner_id, master_combo)) as pct_price
+FROM
+(SELECT
+  *,
+  ROW_NUMBER() OVER(PARTITION BY partner_id,master_combo,brand_name ORDER BY similitud_nombre DESC) as rnk_brand,
+FROM
+  similitud
+WHERE
+  COALESCE(similitud_nombre,0) > 0)
+WHERE
+  rnk_brand = 1)
+
+
+SELECT
+  fo.order_id,
+  d.product.name,
+  d.total,
+  cf.*,
+  d.total*cf.pct_price
+FROM
+  `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+INNER JOIN
+  combos_final cf
+ON
+  cf.partner_id = fo.restaurant.id AND cf.product_id = d.product.product_id
+WHERE
+  fo.registered_date BETWEEN '2025-08-01' AND '2025-08-31'
+AND
+  brand_owner_name LIKE '%Coca%'

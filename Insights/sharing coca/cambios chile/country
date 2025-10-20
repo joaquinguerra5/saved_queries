@@ -3,54 +3,49 @@ DECLARE CPG_filter STRING;
 DECLARE date_filter DATE;
 DECLARE categories ARRAY<STRING>;
 DECLARE sub_categories ARRAY<STRING>;
+DECLARE nartd_l3 ARRAY<STRING>;
 
 SET country_filter = ['Argentina', 'Uruguay', 'Chile', 'Perú', 'Bolivia', 'Costa Rica', 'Guatemala','Panama','Ecuador','Dominican Republic'];
 SET CPG_filter = 'Coca Cola';
 SET date_filter = CURRENT_DATE();
 SET categories = ['beverages'];
-SET sub_categories = ['juice / ice tea / sports / energy','soft drinks / mixers','water','pre-mixed','spirits','milk','ice cream / desserts'];
+SET sub_categories = ['juice / ice tea / sports / energy','soft drinks / mixers','water','pre-mixed','ice cream / desserts'];
+SET nartd_l3 = ['ice tea / canned tea','juice','sports','diet','regular','soft drinks','flavoured','sparkling','still'];
 
 
 WITH base AS (
-SELECT
-  report_period AS report_period,
-  country_name,
-  city AS city_name,
-  CASE WHEN is_dmart IS FALSE THEN 'Local Shop' ELSE 'Dmart' END AS tipo_tienda,
-  product_cpg,
-  product_brand,
-  product_name,
-  barcodes,
-  CASE
-    WHEN 
-      lower(master_category_lvl_one) IN ('packaged foods','frozen','bws') OR product_brand = 'Monster' THEN 'non_nartd'
-      ELSE 'nartd'
-  END as clasificacion,
-  CASE 
-    WHEN 
-      product_cpg = CPG_filter 
-    AND 
-      LOWER(master_category_lvl_two) in UNNEST(sub_categories) 
-    AND 
-      lower(master_category_lvl_one) NOT IN ('packaged foods','frozen','bws') 
-    AND  
-      product_brand != 'Monster' 
-    THEN TRUE
-    ELSE FALSE
-  END as is_target_sale,
-  master_category_lvl_one AS categoria,
-  master_category_lvl_two AS subcategoria,
-  master_category_lvl_three AS l3_categoria,
-  CAST(order_id AS INT64) AS orders,
-  total_price_eur AS gmv_eu,
-  total_price_lc AS gmv_lc,
-  quantity
-FROM
-  `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip`
-WHERE country_name IN UNNEST(country_filter)
-AND report_period BETWEEN DATE_TRUNC(DATE_SUB(date_filter, INTERVAL 1 WEEK), MONTH) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
-)
-
+  SELECT
+    report_period AS report_period,
+    country_name,
+    city AS city_name,
+    product_cpg,
+    product_brand,
+    product_name,
+    barcodes,
+    lower(master_category_lvl_three) IN UNNEST(nartd_l3) as is_nartd,
+    CASE
+      WHEN product_cpg = CPG_filter AND lower(master_category_lvl_three) IN UNNEST(nartd_l3) THEN TRUE
+      ELSE FALSE
+    END
+    AS is_target_sale,
+    master_category_lvl_one AS categoria,
+    master_category_lvl_two AS subcategoria,
+    master_category_lvl_three AS l3_categoria,
+    CAST(order_id AS INT64) AS orders,
+    total_price_eur AS gmv_eu,
+    total_price_lc AS gmv_lc,
+    quantity
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip`
+  WHERE
+    country_name IN UNNEST(country_filter)
+    AND report_period BETWEEN DATE_TRUNC(DATE_SUB(date_filter, INTERVAL 1 WEEK), MONTH) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
+    AND lower(master_category_lvl_two) IN UNNEST(sub_categories)
+    AND lower(master_category_lvl_three) IN UNNEST(nartd_l3)
+    AND
+    quantity > 0
+  AND
+    total_price_lc > 0)
 
 
 -- info Mensual
