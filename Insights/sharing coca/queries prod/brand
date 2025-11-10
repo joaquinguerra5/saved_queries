@@ -24,11 +24,7 @@ SELECT
   product_brand,
   product_name,
   barcodes,
-  CASE
-    WHEN 
-      lower(master_category_lvl_one) IN ('packaged foods','frozen','bws') OR product_brand = 'Monster' THEN 'non_nartd'
-      ELSE 'nartd'
-  END as clasificacion,
+  lower(master_category_lvl_three) IN UNNEST(nartd_l3) as is_nartd, 
   CASE 
     WHEN 
       product_cpg = CPG_filter 
