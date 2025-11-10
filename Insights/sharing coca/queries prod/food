@@ -1,0 +1,202 @@
+DECLARE country_filter ARRAY<INT64>;
+DECLARE CPG_filter STRING;
+DECLARE date_filter DATE;
+
+SET country_filter = [1, 2, 3,7,11,13,16,17,18,21];
+SET CPG_filter = 'Coca Cola';
+SET date_filter = DATE_TRUNC(CURRENT_DATE(),WEEK(MONDAY)); -- La automatización debe correr el martes para que la data registre info semanal de lunes a domingo ya que actualiza tarde 
+
+WITH base AS (
+SELECT
+  DISTINCT
+  fact.registered_date AS report_period,
+  fact.country.country_name,
+  fact.city.city_name AS city_name,
+  'Food' AS tipo_tienda,
+  COALESCE(dim_partner__franchise.franchise_name, 'Longtail') AS Franchise,
+  partner_name,
+  product_company AS product_cpg,
+  od.product_name AS product_brand,
+  'SD' AS product_name,
+  'SD' AS product_ean,
+  product_type AS categoria,
+  product_subtype AS subcategoria,
+  'SD' AS l3_categoria,
+  CAST(fact.order_id AS INT64)  AS orders,
+  total_price_eur AS gmv_eu,
+  total_price_lc AS gmv_lc,
+  d.quantity
+FROM
+  `peya-bi-tools-pro.il_core.fact_orders` fact ,
+UNNEST (fact.details) d
+LEFT JOIN
+  `peya-data-origins-pro.cl_sales_revenue.partnerships_order_level` od -- usamos la tabla de peya, para evitar los cambios de historico que haga DH
+ON
+  fact.order_id = CAST(od.order_id AS INT64)
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` AS dim_partner ON dim_partner.partner_id = fact.restaurant.id
+LEFT JOIN UNNEST([dim_partner.franchise]) AS dim_partner__franchise
+WHERE
+  fact.registered_date BETWEEN DATE_TRUNC(DATE_SUB(date_filter, INTERVAL 1 WEEK), MONTH) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
+  AND dim_partner.country_id IN UNNEST(country_filter)
+  AND fact.order_status = 'CONFIRMED'
+  AND UPPER(dim_partner.business_type.business_type_name) = UPPER('Restaurant')
+  AND UPPER(dim_partner.main_cousine_category_name) NOT LIKE '%HELADOS%'
+  AND UPPER(dim_partner.main_cousine_category_name) NOT LIKE '%POSTRES%'
+
+),
+
+-- identificamos ciudades por mes en donde se tiene que evaluar el share
+compentecia AS (
+SELECT DISTINCT country_name, DATE_TRUNC(report_period, MONTH) AS periodo ,CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END AS apertura, city_name, categoria, subcategoria
+FROM base
+WHERE categoria IN ('beverage','Beverages')
+AND product_cpg = CPG_filter 
+),
+
+franquicias_coca AS (
+SELECT DISTINCT country_name, DATE_TRUNC(report_period, MONTH) AS periodo , Franchise, partner_name
+FROM base
+WHERE categoria IN ('beverage')
+AND product_cpg = CPG_filter 
+)
+
+
+-- info food
+,
+ordenes_totales_food_mes AS (
+SELECT 
+  DATE_TRUNC(c.report_period, MONTH) AS periodo,
+  c.country_name,
+  COUNT(DISTINCT orders) AS ordenes_totales_food,
+FROM base c 
+INNER JOIN franquicias_coca
+ON 
+  periodo = DATE_TRUNC(c.report_period, MONTH) 
+  AND c.country_name = franquicias_coca.country_name
+  AND franquicias_coca.Franchise = c.Franchise
+  AND franquicias_coca.partner_name = c.partner_name
+WHERE 
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'Food'
+GROUP BY ALL
+ORDER BY 1,2,3
+)
+,
+
+total_coca_mes AS (
+  SELECT 
+    DATE_TRUNC(c.report_period, MONTH) AS periodo,
+    c.country_name,
+    COUNT(DISTINCT orders) AS ordenes_total_cpg
+  FROM base c
+  WHERE CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'Food'
+  AND product_cpg = CPG_filter 
+  GROUP BY 1, 2
+),
+
+ordenes_totales_food_dia AS (
+SELECT 
+  c.report_period AS periodo,
+  c.country_name,
+  COUNT(DISTINCT orders) AS ordenes_totales_food,
+FROM base c 
+INNER JOIN franquicias_coca
+ON 
+  periodo = DATE_TRUNC(c.report_period, MONTH) 
+  AND c.country_name = franquicias_coca.country_name
+  AND franquicias_coca.Franchise = c.Franchise
+  AND franquicias_coca.partner_name = c.partner_name
+WHERE 
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'Food'
+GROUP BY ALL
+ORDER BY 1,2,3
+)
+,
+
+total_coca_dia AS (
+  SELECT 
+    c.report_period AS periodo,
+    c.country_name,
+    COUNT(DISTINCT orders) AS ordenes_total_cpg
+  FROM base c
+  WHERE CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'Food'
+  AND product_cpg = CPG_filter 
+  GROUP BY 1, 2
+)
+
+--base_final AS (
+SELECT 
+  'Mensual' AS apertura_informacion,
+  DATE_TRUNC(c.report_period, MONTH) AS periodo,
+  c.country_name,
+  c.Franchise,
+  --MAX(ordenes_totales_food.ordenes_totales_food) AS total_franquicias_coca,
+  --COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END) AS total_coca_en_franquicia,
+  --MAX(total_coca.ordenes_total_cpg) AS total_coca,
+  --COUNT(DISTINCT orders) AS total_franquicia,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END) , COUNT(DISTINCT orders)) AS incidencia_franquicia,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END) , MAX(ordenes_totales_food_mes.ordenes_totales_food)) AS incidencia_general_cpg,
+  SAFE_DIVIDE(
+    COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END), 
+    MAX(total_coca_mes.ordenes_total_cpg)) AS peso_franquicia_en_coca,
+FROM base c 
+INNER JOIN compentecia com
+ON
+  com.periodo = DATE_TRUNC(c.report_period, MONTH) 
+  AND com.country_name = c.country_name
+  AND com.city_name = c.city_name
+  AND com.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+LEFT JOIN 
+  ordenes_totales_food_mes 
+ON
+  ordenes_totales_food_mes.periodo = DATE_TRUNC(c.report_period, MONTH) 
+  AND ordenes_totales_food_mes.country_name = c.country_name
+LEFT JOIN total_coca_mes 
+ON 
+  total_coca_mes.periodo = DATE_TRUNC(c.report_period, MONTH) 
+  AND total_coca_mes.country_name = c.country_name
+WHERE 
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'Food'
+  --AND Franchise LIKE '%McDonald%'
+GROUP BY ALL
+HAVING incidencia_franquicia >0
+
+UNION ALL
+
+
+SELECT 
+  'Diaria' AS apertura_informacion,
+  c.report_period AS periodo,
+  c.country_name,
+  c.Franchise,
+  --MAX(ordenes_totales_food.ordenes_totales_food) AS total_franquicias_coca,
+  --COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END) AS total_coca_en_franquicia,
+  --MAX(total_coca.ordenes_total_cpg) AS total_coca,
+  --COUNT(DISTINCT orders) AS total_franquicia,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END) , COUNT(DISTINCT orders)) AS incidencia_franquicia,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END) , MAX(ordenes_totales_food_dia.ordenes_totales_food)) AS incidencia_general_cpg,
+  SAFE_DIVIDE(
+    COUNT(DISTINCT CASE WHEN product_cpg = CPG_filter  THEN orders ELSE NULL END), 
+    MAX(total_coca_dia.ordenes_total_cpg)) AS peso_franquicia_en_coca,
+FROM base c 
+INNER JOIN compentecia com
+ON
+  com.periodo = DATE_TRUNC(c.report_period, MONTH)
+  AND com.country_name = c.country_name
+  AND com.city_name = c.city_name
+  AND com.apertura = CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END
+LEFT JOIN 
+  ordenes_totales_food_dia
+ON
+  ordenes_totales_food_dia.periodo = c.report_period
+  AND ordenes_totales_food_dia.country_name = c.country_name
+LEFT JOIN total_coca_dia
+ON 
+  total_coca_dia.periodo = c.report_period
+  AND total_coca_dia.country_name = c.country_name
+WHERE 
+  CASE WHEN tipo_tienda = 'Food' THEN 'Food' ELSE 'QC' END = 'Food'
+  --AND Franchise LIKE '%McDonald%'
+  AND c.report_period BETWEEN DATE_SUB(date_filter, INTERVAL 7 DAY) AND DATE_SUB(date_filter,INTERVAL 1 DAY)
+GROUP BY ALL
+HAVING incidencia_franquicia >0
+ORDER BY 1,2,3

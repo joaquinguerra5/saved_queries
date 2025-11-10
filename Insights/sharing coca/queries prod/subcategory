@@ -1,0 +1,100 @@
+---- SUBCATEGORY
+
+DECLARE country_filter ARRAY<INT64>;
+DECLARE CPG_filter STRING;
+DECLARE date_filter DATE;
+DECLARE categories ARRAY<STRING>;
+DECLARE sub_categories ARRAY<STRING>;
+DECLARE nartd_l3 ARRAY<STRING>;
+
+SET country_filter = [1, 2, 3,7,11,13,16,17,18,21];
+SET CPG_filter = 'Coca Cola';
+SET date_filter = DATE_TRUNC(CURRENT_DATE(),WEEK(MONDAY)); -- La automatización debe correr el martes para que la data registre info semanal de lunes a domingo ya que actualiza tarde 
+SET categories = ['beverages'];
+SET sub_categories = ['juice / ice tea / sports / energy','soft drinks / mixers','water','pre-mixed','ice cream / desserts'];
+SET nartd_l3 = ['ice tea / canned tea','juice','sports','diet','regular','soft drinks','flavoured','sparkling','still'];
+
+WITH base AS (
+SELECT
+  report_period AS report_period,
+  dip.country_name,
+  city AS city_name,
+  CASE WHEN is_dmart IS FALSE THEN 'Local Shop' ELSE 'Dmart' END AS tipo_tienda,
+  product_cpg,
+  product_brand,
+  product_name,
+  barcodes,
+  lower(master_category_lvl_three) IN UNNEST(nartd_l3) as is_nartd, 
+  CASE 
+    WHEN 
+      product_cpg = CPG_filter 
+    THEN TRUE
+    ELSE FALSE
+  END as is_target_sale,
+  master_category_lvl_one AS categoria,
+  master_category_lvl_two AS subcategoria,
+  master_category_lvl_three AS l3_categoria,
+  CAST(order_id AS INT64) AS orders,
+  total_price_eur AS gmv_eu,
+  total_price_lc AS gmv_lc,
+  quantity
+FROM
+  `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip` dip
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_historical_partners` dp
+  ON
+    SAFE_CAST(dp.restaurant_id AS STRING) = dip.platform_vendor_id AND dp.yyyymmdd = dip.report_period
+WHERE dp.country_id IN UNNEST(country_filter)
+AND report_period BETWEEN DATE_TRUNC(DATE_SUB(date_filter, INTERVAL 1 WEEK), MONTH) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
+AND
+   lower(master_category_lvl_two) IN UNNEST(sub_categories)
+AND
+  quantity > 0
+AND
+  total_price_lc > 0
+
+)
+
+
+
+
+SELECT 
+  'Mensual' AS apertura_informacion,
+  DATE_TRUNC(c.report_period, MONTH) AS periodo,
+  c.country_name,
+  c.city_name,
+  c.categoria,
+  c.subcategoria,
+  COUNT(DISTINCT CASE WHEN is_target_sale THEN orders ELSE NULL END) AS orders_cpg,
+  COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg,
+  SUM(CASE WHEN is_target_sale THEN quantity END) as unidades,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN is_target_sale THEN orders  ELSE NULL END) , COUNT(DISTINCT orders)) AS incidencia,
+  COALESCE(SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001), SUM(gmv_lc)),0) AS share,
+  COALESCE(SUM(CASE WHEN is_target_sale AND is_nartd THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg_nartd,
+  COALESCE(SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale AND is_nartd THEN gmv_lc ELSE NULL END),0.00001),SUM(CASE WHEN is_nartd THEN gmv_lc END)),0) AS share_nartd
+FROM base c 
+GROUP BY ALL
+
+
+UNION ALL
+
+
+SELECT 
+  'Diaria' AS apertura_informacion,
+  c.report_period AS periodo,
+  c.country_name,
+  c.city_name,
+  c.categoria,
+  c.subcategoria,
+  COUNT(DISTINCT CASE WHEN is_target_sale THEN orders ELSE NULL END) AS orders_cpg,
+  COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg,
+  SUM(CASE WHEN is_target_sale THEN quantity END) as unidades,
+  SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN is_target_sale THEN orders  ELSE NULL END) , COUNT(DISTINCT orders)) AS incidencia,
+  COALESCE(SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale THEN gmv_lc ELSE NULL END),0.00001), SUM(gmv_lc)),0) AS share,
+  COALESCE(SUM(CASE WHEN is_target_sale AND is_nartd THEN gmv_lc ELSE NULL END),0.00001) AS gmv_lc_cpg_nartd,
+  COALESCE(SAFE_DIVIDE(COALESCE(SUM(CASE WHEN is_target_sale AND is_nartd THEN gmv_lc ELSE NULL END),0.00001),SUM(CASE WHEN is_nartd THEN gmv_lc END)),0) AS share_nartd
+FROM base c 
+WHERE 
+  c.report_period BETWEEN DATE_SUB(date_filter, INTERVAL 7 DAY) AND DATE_SUB(date_filter, INTERVAL 1 DAY)
+GROUP BY ALL
+

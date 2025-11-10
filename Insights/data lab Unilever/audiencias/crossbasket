@@ -1,0 +1,54 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_datalab_audiencias_crossbasket`
+
+PARTITION BY report_period
+
+CLUSTER BY
+  product_brand
+
+AS
+
+
+-- Usamos WITH para organizar la lógica en pasos claros
+WITH
+  -- Paso 1: Obtenemos el contexto de Unilever para cada orden (qué marca/categoría de Unilever hay)
+  unilever_context AS (
+    SELECT DISTINCT -- DISTINCT para evitar duplicados si la misma marca/cat está varias veces en una orden
+      report_period,
+      order_id,
+      product_brand,
+      master_category_lvl_one,
+      master_category_lvl_two,
+      master_category_lvl_three,
+      master_category_lvl_four
+    FROM
+      `peya-food-and-groceries.user_joaquin_guerra.temp_datalab_audiencias`
+    WHERE
+      product_cpg = 'Unilever'
+  ),
+  
+  -- Paso 2: Obtenemos las categorías de OTROS productos para cada orden
+  other_categories AS (
+    SELECT DISTINCT
+      order_id,
+      product_brand as product_brand_cb,
+      master_category_lvl_one l1_cb,
+      master_category_lvl_two l2_cb,
+      master_category_lvl_three l3_cb
+    FROM
+      `peya-food-and-groceries.user_joaquin_guerra.temp_datalab_audiencias` 
+  )
+
+-- Paso 3: Unimos ambos contextos y contamos las órdenes donde coexisten
+SELECT
+  -- El día (para tu resumen diario)
+  u.*,
+  -- Esta es la categoría que se compró junto a los productos de Unilever
+  o.* EXCEPT(order_id,product_brand_cb)
+FROM
+  unilever_context AS u
+LEFT JOIN
+  other_categories AS o ON u.order_id = o.order_id AND product_brand!=product_brand_cb
+WHERE
+  report_period >= '2025-01-01'
+GROUP BY
+  ALL
