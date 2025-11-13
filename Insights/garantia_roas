@@ -1,0 +1,164 @@
+WITH 
+cpgs_dip AS (
+  SELECT
+  --platform_vendor_id,
+  barcodes,
+  product_cpg
+FROM
+  (
+    SELECT
+      platform_vendor_id,
+      ltrim(barcodes,'0') as barcodes,
+      product_cpg,
+      ROW_NUMBER() OVER (PARTITION BY  ltrim(barcodes,'0') ORDER BY report_period DESC) as rn
+    FROM
+      `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip`
+    WHERE
+      report_period BETWEEN '2025-08-01' AND '2025-08-31'
+    AND
+      is_dmart
+    AND
+      barcodes IS NOT NULL
+    AND
+      product_cpg NOT IN ('Others','Unbranded')
+    AND
+      product_cpg IS NOT NULL 
+  )
+WHERE
+  rn = 1
+),
+
+
+
+cpc AS 
+  (
+    SELECT
+  dim_country.country_code,
+  SUM(ad.total_clicks) AS clicks,
+  SUM(ad.sales_revenue) AS sales_revenue,
+  SAFE_DIVIDE(SUM(ad.sales_revenue),AVG(currency.rate_eu)) AS sales_revenue_eur,
+  SUM(ad.ad_spend) AS ad_spend,
+  SAFE_DIVIDE(SUM(ad.ad_spend),AVG(currency.rate_eu)) AS ad_spend_eur,
+  SAFE_DIVIDE(SUM(sales_revenue),SUM(ad_spend)) AS ROAS,
+  SAFE_DIVIDE(SUM(ad_spend),SUM(total_clicks)) AS CPC_LC,
+  SAFE_DIVIDE(SAFE_DIVIDE(SUM(ad.ad_spend), AVG(currency.rate_eu)), SUM(total_clicks)) AS CPC_eur,
+FROM `peya-data-origins-pro.cl_dmarts.qcadtech_agg_dmp_v2` AS ad
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` p
+ON
+  p.partner_id = CAST(ad.vendor_id AS INT64)
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS dim_country
+  ON ad.global_entity_id = dim_country.global_entity_id
+  AND dim_country.active IS TRUE
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_currency_exchange` AS currency
+  ON DATE_TRUNC(ad.date, MONTH) = currency.currency_exchange_date
+  AND ad.currency_code = currency.currency_iso
+  AND dim_country.currency_id = currency.currency_id
+LEFT JOIN `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` vp
+        ON p.partner_id = vp.remote_vendor_id
+        AND ad.product_master_code = vp.master_code
+        and vendor_is_online
+        and product_is_active
+        and category_tree_source != 'VENDOR'
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  pim.product_id = ad.product_master_code
+  WHERE ad.date BETWEEN '2025-08-01' AND '2025-08-31'
+    AND LOWER(ad.campaign_name) NOT LIKE '%nternal%'
+    AND LOWER(ad.campaign_name) NOT LIKE '%upselling%'
+    AND ad.asset_type IN ('AD_TYPE_LISTING','AD_TYPE_SEARCH')
+    AND ad.campaign_type = 'AD_FORMAT_PRODUCT_AD'
+    AND NOT (
+      REGEXP_CONTAINS(UPPER(ad.account_name), 'DMART')
+      OR REGEXP_CONTAINS(UPPER(ad.account_name), 'LOCAL SHOPS'))
+    
+    GROUP BY ALL),
+
+cpc_abv AS 
+(SELECT
+  dp.country.country_code,
+  pim.product_id as master_code,
+  AVG(total) as avg_product_bvalue,
+  ANY_VALUE(CPC_LC) as cpc
+FROM
+  `peya-bi-tools-pro.il_core.fact_orders` fo, UNNEST(details) d
+INNER JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  fo.restaurant.id = dp.partner_id AND lower(dp.country.country_code) = 'ar' AND is_darkstore
+left join
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+ON
+  dvp.remote_vendor_id = dp.partner_id AND dvp.remote_product_id = d.product.product_id
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+on
+  pim.product_id = dvp.master_code
+LEFT JOIN
+  cpc
+ON
+  lower(cpc.country_code) = lower(dp.country.country_code)
+WHERE
+  fo.registered_date BETWEEN '2025-08-01' AND '2025-08-31'
+AND
+  order_status = 'CONFIRMED'
+GROUP BY
+  1,2
+),
+
+base_products AS
+(SELECT
+  dp.country.country_code,
+  pim.product_id as master_code,
+  pop.product_name,
+  pop.barcode,
+  pim.brands_name,
+  COALESCE(cd.product_cpg,pim.brand_owner_name) as cpg,
+  --pim.brand_owner_name,
+  SUM(orders) as confirmed_orders,
+  SUM(clicks) as clicks,
+  LEAST(SAFE_DIVIDE(SUM(orders),SUM(clicks)),1) as conversion,
+  COALESCE(SAFE_DIVIDE(SUM(clicks),SUM(orders)),0) as clicks_orden,
+  ANY_valUE(ca.avg_product_bvalue) avg_prod_bvalue,
+  ANY_VALUE(ca.cpc) as cpc
+FROM
+  `peya-food-and-groceries.automated_tables_reports.media_insights_product_popularity` pop
+INNER JOIN  
+   (SELECT * FROM `peya-bi-tools-pro.il_core.dim_partner` where lower(country.country_code) = 'ar' AND is_darkstore) dp
+ON
+  dp.partner_id = pop.partner_id AND is_darkstore
+LEFT JOIN
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+ON
+  dvp.remote_product_id = pop.product_id AND dvp.remote_vendor_id = pop.partner_id
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  dvp.master_code = pim.product_id
+LEFT JOIN
+  cpc_abv ca
+ON
+  ca.master_code = pim.product_id AND lower(ca.country_code) = lower(dp.country.country_code)
+LEFT JOIN
+  cpgs_dip cd
+ON
+  cd.barcodes = ltrim(dvp.barcodes,'0')
+WHERE
+  pop.date BETWEEN '2025-08-01' AND '2025-08-31'
+AND
+  brands_name != 'unbranded'
+AND
+  pop.barcode IS NOT NULL
+AND
+  COALESCE(cd.product_cpg,pim.brand_owner_name) IS NOT NULL 
+GROUP BY
+  ALL
+ORDER BY
+  clicks DESC)
+
+SELECT
+  *,
+  SAFE_DIVIDE((SUM(clicks) OVER(ORDER BY clicks DESC)),SUM(clicks) OVER()) as clicks_accum,
+  SUM(clicks) OVER() as total_clicks,
+FROM
+  base_products

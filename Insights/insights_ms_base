@@ -1,0 +1,200 @@
+DECLARE fecha_comienzo DATE;
+DECLARE fecha_fin DATE;
+
+-- SET fecha_comienzo = DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH);  -- Comienzo hace 13 meses desde el primer día de ese mes
+-- SET fecha_fin = LAST_DAY(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH));  -- Fin del último mes cerrado
+
+
+SET fecha_comienzo = '2024-02-01';
+SET fecha_fin = '2025-10-31';
+
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.temp_insights_ms_base` 
+
+PARTITION BY report_period
+
+CLUSTER BY country_name, month_year
+
+AS
+
+--INSERT INTO `peya-food-and-groceries.automated_tables_reports.insights_ms_base`
+
+WITH
+qc_catalog_products AS (
+    SELECT
+      global_entity_id,
+      product_name,
+      sku,
+      warehouse_id,
+      CASE
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") = False THEN SUBSTR(b.barcode,1,INSTR(b.barcode,',')-1)
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") THEN SUBSTR(b.barcode,2,INSTR(b.barcode,',')-2)
+        ELSE b.barcode 
+      END AS barcode,
+      cd.parent_category_id,
+      cd.category_name_local AS category_local,
+      c.category_level,
+      cd.is_primary_category,
+      brand_name,
+      vp.platform_vendor_id AS platform_vendor_id,
+      qc.chain_product_created_at_utc
+    FROM `peya-data-origins-pro.cl_dmarts.qc_catalog_products` AS qc
+    LEFT JOIN UNNEST(barcodes) AS b
+    ,UNNEST(vendor_products) AS vp
+    ,UNNEST(vp.categories) AS c
+    ,UNNEST(c.category_details) AS cd
+    --  WHERE
+    --   sku ='Z0002387'
+    -- AND
+    --   platform_vendor_id = '346555'
+    QUALIFY ROW_NUMBER() OVER latest_chain = 1
+    WINDOW latest_chain AS (
+    PARTITION BY qc.global_entity_id, qc.sku, vp.warehouse_id, vp.platform_vendor_id, c.category_level
+    ORDER BY qc.chain_product_created_at_utc DESC NULLS LAST)
+
+),
+
+vendor_products AS (
+  SELECT
+    platform_vendor_id,
+    sku,
+    barcode,
+    MAX(IF(category_level = 1,category_local,NULL)) as category,
+    MAX(IF(category_level = 2,category_local,NULL)) as subcategory
+  FROM
+    qc_catalog_products
+  WHERE
+    category_level IS NOT NULL
+  AND
+    category_level IN (1,2)
+  GROUP BY
+    1,2,3
+
+)
+
+
+
+
+
+
+SELECT 
+  DISTINCT
+  DATE_TRUNC(report_period, MONTH) AS month_year,
+ ord.user.id AS user_id,
+ user.income,
+ user.gender_merged as gender,
+  user.age_group_merged as age_group,
+  user.segment,
+  subsegment,
+  CASE 
+      WHEN o_p.country_name IN ('Dominican Republic', 'República Dominicana') THEN 'República Dominicana'
+      WHEN o_p.country_name IN ('Panama', 'Panamá') THEN 'Panamá'
+      WHEN o_p.country_name IN ('Peru', 'Perú') THEN 'Perú'
+      ELSE o_p.country_name END AS country_name, 
+  o_p.city,
+  application,
+  report_period,
+  hour_part,
+  CASE 
+    WHEN EXTRACT(DAYOFWEEK FROM report_period) = 1 THEN 'Domingo'
+    WHEN EXTRACT(DAYOFWEEK FROM report_period) = 2 THEN 'Lunes'
+    WHEN EXTRACT(DAYOFWEEK FROM report_period) = 3 THEN 'Martes'
+    WHEN EXTRACT(DAYOFWEEK FROM report_period) = 4 THEN 'Miércoles'
+    WHEN EXTRACT(DAYOFWEEK FROM report_period) = 5 THEN 'Jueves'
+    WHEN EXTRACT(DAYOFWEEK FROM report_period) = 6 THEN 'Viernes'
+    WHEN EXTRACT(DAYOFWEEK FROM report_period) = 7 THEN 'Sábado'
+  END AS dia_semana, 
+  CASE 
+    WHEN EXTRACT(DAY FROM report_period) <= 7 THEN '1ra sem'
+    WHEN EXTRACT(DAY FROM report_period) <= 14 THEN '2da sem'
+    WHEN EXTRACT(DAY FROM report_period) <= 21 THEN '3ra sem'
+    ELSE '4ta sem'
+  END AS semana_mes, 
+  CASE
+      WHEN hour_part BETWEEN 8  AND 13 THEN 'morning'
+      WHEN hour_part BETWEEN 14 AND 19 THEN 'afternoon'
+      WHEN hour_part BETWEEN 20 AND 23 THEN 'night'
+      WHEN hour_part BETWEEN 0  AND 5  THEN 'mid_night'
+      END AS momento_dia,
+  CASE
+    WHEN dp.is_darkstore THEN 'Dmart'
+    WHEN dp.is_aaa THEN 'AAA'
+    ELSE 'LS'
+  END
+    as business_vertical,
+  COALESCE(segments_ls,dp.business_type.business_type_name) as segments_ls,
+  ord.business_type.business_type_name,
+  o_p.platform_vendor_id AS partner_id,
+  o_p.vendor_name AS partner_name,
+  o_p.order_id,
+  co.consumption_occasion AS consumption_occasion,
+  s2.order_in_cart AS order_in_cart,
+  pp.user.is_user_plus,
+  product_cpg,
+  product_brand,
+  master_category_lvl_one,
+  master_category_lvl_two,
+  master_category_lvl_three,
+  o_p.barcodes,
+  o_p.product_name,
+  quantity,
+  total_price_eur,
+  total_price_lc,
+  vp.category AS category_partner,
+  vp.subcategory AS subcategory_partner,
+
+FROM
+  `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip`  o_p
+LEFT JOIN 
+  `peya-bi-tools-pro.il_core.fact_orders` ord
+ON
+  ord.order_id = CAST(o_p.order_id AS INT64)
+  AND ord.registered_date BETWEEN fecha_comienzo AND fecha_fin
+LEFT JOIN
+  `peya-bi-tools-pro.il_growth.user_income`  user
+ON
+  user.user_id = ord.user.id
+LEFT JOIN 
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = CAST(o_p.platform_vendor_id AS INT64)
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.qc_ls_dim_partner` ls
+ON
+  dp.partner_id = ls.partner_id AND ls.yyyymmdd = o_p.report_period
+LEFT JOIN
+  `peya-datamarts-pro.dm_order_profitability.fact_order_profitability` pp
+ON
+  pp.order_id = CAST(o_p.order_id AS INT64)
+  AND pp.registered_date BETWEEN fecha_comienzo AND fecha_fin
+LEFT JOIN
+    (SELECT *
+  FROM 
+    (SELECT
+    *,
+    ROW_NUMBER() OVER (PARTITION BY order_id ) as Aux
+    FROM `peya-food-and-groceries.qc_insights.mapping_order_consumption_occasion`
+    ) 
+  WHERE Aux = 1 ) co
+ON
+  co.user_id = ord.user.id
+  AND co.order_id = CAST(o_p.order_id AS INT64)
+LEFT JOIN
+  (SELECT *
+  FROM 
+    (SELECT
+    *,
+    ROW_NUMBER() OVER (PARTITION BY order_id, product_id ORDER BY order_in_cart) as Aux
+    FROM `peya-food-and-groceries.automated_tables_reports.fact_basket_starters`
+    ) 
+  WHERE Aux = 1 )
+  s2
+ON
+  s2.order_id = CAST(o_p.order_id AS INT64)
+  AND s2.product_name = o_p.product_name
+LEFT JOIN vendor_products vp
+ON
+        o_p.platform_vendor_id = vp.platform_vendor_id
+        AND vp.sku = o_p.sku
+WHERE
+  o_p.report_period BETWEEN fecha_comienzo AND fecha_fin
+
