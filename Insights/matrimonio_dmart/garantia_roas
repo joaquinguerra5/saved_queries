@@ -1,0 +1,191 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_garantia_roas`
+
+CLUSTER BY
+  country_code,cpg
+
+AS
+
+WITH 
+
+brand_cpg_exception_list AS (
+  SELECT
+    *
+  FROM
+    `peya-data-origins-pro.cl_qcommerce.cpg_brand_mapping_exceptional_list` el
+  QUALIFY ROW_NUMBER() OVER latest_update = 1
+    WINDOW latest_update AS (
+    PARTITION BY global_entity_id, product_cpg, product_brand
+    ORDER BY COALESCE(
+    SAFE.PARSE_DATE('%d/%m/%Y', is_updated_by_central),
+    SAFE.PARSE_DATE('%m/%d/%Y', is_updated_by_central)
+) DESC NULLS LAST)
+  ORDER BY
+    1,2,3
+),
+
+qc_catalog_products AS (
+    SELECT
+      qc.global_entity_id,
+      qc.product_name,
+      qc.sku,
+      pim.product_id AS master_code,
+      CASE
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") = False THEN SUBSTR(b.barcode,1,INSTR(b.barcode,',')-1)
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") THEN SUBSTR(b.barcode,2,INSTR(b.barcode,',')-2)
+        ELSE b.barcode
+      END AS barcode,
+      COALESCE(sel.correct_product_cpg, el.correct_product_cpg, pim.brand_owner_name, 'Others') AS product_cpg,
+      COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') AS product_brand,
+      c.master_category_names.level_one,
+      c.master_category_names.level_two,
+      c.master_category_names.level_three,
+      vp.platform_vendor_id AS platform_vendor_id,
+      vp.catalog_price_lc AS catalog_price_lc,
+    FROM `peya-data-origins-pro.cl_dmarts.qc_catalog_products` AS qc
+    ,UNNEST(barcodes) AS b
+    ,UNNEST(vendor_products) AS vp
+    ,UNNEST(master_categories) AS c
+    LEFT JOIN
+      `peya-data-origins-pro.cl_dmarts.pim_product` pim
+    ON
+      pim.product_id = qc.pim_product_id
+    LEFT JOIN brand_cpg_exception_list  AS el
+      ON qc.global_entity_id = el.global_entity_id
+      AND COALESCE(pim.brand_owner_name, 'Others') = el.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = INITCAP(el.product_brand)
+    LEFT JOIN `peya-data-origins-pro.cl_qcommerce.cpg_barcode_mapping_exceptional_list` AS sel
+      ON qc.global_entity_id = sel.global_entity_id
+      AND COALESCE(el.correct_product_cpg, pim.brand_owner_name, 'Others') = sel.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = sel.product_brand
+      AND (CASE
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") = False THEN SUBSTR(b.barcode,1,INSTR(b.barcode,',')-1)
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") THEN SUBSTR(b.barcode,2,INSTR(b.barcode,',')-2)
+        ELSE b.barcode
+      END) = sel.barcode
+    QUALIFY ROW_NUMBER() OVER latest_chain = 1
+    WINDOW latest_chain AS (
+    PARTITION BY qc.global_entity_id, qc.sku, vp.warehouse_id, vp.platform_vendor_id
+    ORDER BY qc.chain_product_created_at_utc DESC NULLS LAST)
+),
+
+
+cpc_country AS 
+  (
+    SELECT
+  dim_country.country_code,
+  --SUM(ad.total_clicks) AS clicks,
+  SAFE_DIVIDE(SUM(ad_spend),SUM(total_clicks)) AS CPC_LC,
+  SAFE_DIVIDE(SUM(SAFE_DIVIDE(ad.ad_spend,currency.rate_eu)),SUM(total_clicks)) as CPC_eur
+FROM `peya-data-origins-pro.cl_dmarts.qcadtech_agg_dmp_v2` AS ad
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` p
+ON
+  p.partner_id = CAST(ad.vendor_id AS INT64)
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS dim_country
+  ON ad.global_entity_id = dim_country.global_entity_id
+  AND dim_country.active IS TRUE
+LEFT JOIN `peya-bi-tools-pro.il_core.dim_currency_exchange` AS currency
+  ON DATE_TRUNC(ad.date, MONTH) = currency.currency_exchange_date
+  AND ad.currency_code = currency.currency_iso
+  AND dim_country.currency_id = currency.currency_id
+  WHERE ad.date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 45 DAY) AND CURRENT_DATE()
+    AND LOWER(ad.campaign_name) NOT LIKE '%nternal%'
+    AND LOWER(ad.campaign_name) NOT LIKE '%upselling%'
+    AND ad.asset_type IN ('AD_TYPE_LISTING','AD_TYPE_SEARCH')
+    AND ad.campaign_type = 'AD_FORMAT_PRODUCT_AD'
+    AND NOT (
+      REGEXP_CONTAINS(UPPER(ad.account_name), 'DMART')
+      OR REGEXP_CONTAINS(UPPER(ad.account_name), 'LOCAL SHOPS'))
+    
+    GROUP BY ALL),
+
+prod_cpc_abv AS (
+  SELECT
+    qc_orders.country_code,
+    p.master_code,
+    AVG(items.value_euro.total_amt_paid_eur) AS ABV_eur,
+    AVG(items.value_euro.total_amt_paid_net_eur) AS ABV_net_eur,
+    AVG(items.value_lc.unit_price_listed_lc) AS ABV_lc,
+    AVG(items.value_lc.total_amt_paid_lc) AS ABV_net_lc,
+    ANY_VALUE(cc.CPC_eur) as cpc_eur,
+    ANY_VALUE(cc.CPC_lc) as cpc_lc
+  FROM `peya-data-origins-pro.cl_dmarts.qc_orders` qc_orders,
+  UNNEST(qc_orders.items) AS items
+  INNER JOIN `peya-bi-tools-pro.il_core.dim_partner` AS dim_partner ON CAST(dim_partner.partner_id AS STRING) = qc_orders.platform_vendor_id
+  LEFT JOIN
+    qc_catalog_products p
+  ON
+    p.sku =items.sku AND p.platform_vendor_id = qc_orders.platform_vendor_id
+  LEFT JOIN
+    cpc_country cc
+  ON
+    lower(cc.country_code) = LOWER(qc_orders.country_code)
+  WHERE qc_orders.order_created_date_lt BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 45 DAY) AND DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+  AND
+    is_dmart
+  AND
+    qc_orders.is_successful
+  GROUP BY  
+    ALL
+
+),
+
+
+
+base_products AS
+(SELECT
+  dp.country.country_code,
+  p.master_code,
+  p.product_name,
+  p.barcode,
+  p.product_brand as brand_name,
+  p.level_one,
+  p.level_two,
+  p.product_cpg as cpg,
+  --pim.brand_owner_name,
+  SUM(orders) as confirmed_orders,
+  SUM(clicks) as clicks,
+  LEAST(SAFE_DIVIDE(SUM(orders),SUM(clicks)),1) as conversion,
+  COALESCE(SAFE_DIVIDE(SUM(clicks),SUM(orders)),0) as clicks_orden,
+  ANY_VALUE(ca.ABV_lc) avg_prod_bvalue,
+  ANY_VALUE(ca.CPC_lc) as cpc
+FROM
+  `peya-food-and-groceries.automated_tables_reports.media_insights_product_popularity` pop
+INNER JOIN  
+   (SELECT * FROM `peya-bi-tools-pro.il_core.dim_partner` WHERE is_darkstore) dp
+ON
+  dp.partner_id = pop.partner_id AND is_darkstore
+LEFT JOIN
+  qc_catalog_products p
+ON
+  p.sku = pop.sku AND p.platform_vendor_id = SAFE_CAST(dp.partner_id AS STRING)
+LEFT JOIN
+  prod_cpc_abv ca
+ON
+  ca.master_code = p.master_code AND lower(ca.country_code) = lower(dp.country.country_code)
+WHERE
+  pop.date BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 45 DAY) AND CURRENT_DATE()
+AND
+  lower(p.product_brand) NOT IN ('unbranded','pedidosya','carrefour')
+AND
+  lower(product_cpg) != 'others'
+AND
+  pop.barcode IS NOT NULL
+AND
+  p.product_cpg IS NOT NULL 
+GROUP BY
+  ALL
+ORDER BY
+  clicks DESC)
+
+SELECT
+  *,
+  SAFE_DIVIDE((SUM(clicks) OVER(ORDER BY clicks DESC)),SUM(clicks) OVER()) as clicks_accum,
+  SUM(clicks) OVER() as total_clicks,
+FROM
+  base_products
+WHERE
+--   brand_name = 'Ace'
+-- AND
+--   country_code = 'AR'
+-- AND
+  clicks > 0

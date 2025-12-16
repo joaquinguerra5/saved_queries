@@ -1,0 +1,274 @@
+WITH 
+  fact_orders AS (
+    SELECT
+      *
+    FROM `peya-bi-tools-pro.il_core.fact_orders` AS orders
+    WHERE 
+      orders.registered_date BETWEEN DATE_SUB(DATE_TRUNC(current_date(), MONTH), INTERVAL 2 MONTH) AND DATE_SUB(DATE_TRUNC(current_date(), MONTH), INTERVAL 1 DAY)
+      AND orders.order_status = "CONFIRMED"
+  ),
+  shopping_missions AS (
+    SELECT
+      *
+    FROM `peya-bi-tools-pro.il_qcommerce.fact_groceries_shopping_missions` AS sm
+    WHERE registered_date BETWEEN DATE_SUB(DATE_TRUNC(current_date(), MONTH), INTERVAL 2 MONTH) AND DATE_SUB(DATE_TRUNC(current_date(), MONTH), INTERVAL 1 DAY)
+  ),
+  partner_menu AS (
+    SELECT
+      *
+    FROM
+      (
+        SELECT
+          DISTINCT partner.country.country_name AS country_name,
+          partner.partner_status,
+          business_type.business_type_name as vertical_segment,
+          partner.city.name as city_name,
+          menu.pim_product_id AS master_code,
+          NULLIF(ARRAY_TO_STRING(ARRAY(SELECT barcode FROM UNNEST(menu.barcodes)), ','), '') AS barcodes,
+          menu.product_name,
+          vp.catalog_price_lc,
+          vp.platform_vendor_id AS partner_id,
+          vp.platform_product_id AS product_id,
+          vp.vendor_product_is_active AS is_active,
+          mp.master_category_names.level_one AS level_one,
+          mp.master_category_names.level_two AS level_two,
+          mp.master_category_names.level_three AS level_three,
+          CAST(vp.vendor_product_created_at_utc AS DATE) AS created_at,
+          DATE_DIFF( current_date(), CAST(vp.vendor_product_created_at_utc AS DATE), day) AS days_created,
+          CASE WHEN DATE_DIFF( current_date(), CAST(vp.vendor_product_created_at_utc AS DATE), day) < 90 THEN 1 ELSE 0 END AS newness
+        FROM
+          `peya-data-origins-pro.cl_dmarts.qc_catalog_products` AS menu
+            , UNNEST(menu.vendor_products) AS vp
+            , UNNEST(menu.master_categories) AS mp
+        LEFT JOIN
+          `peya-food-and-groceries.automated_tables_reports.dim_partner_supply_ls` AS partner
+        ON
+          vp.platform_vendor_id = CAST(partner.partner_id AS STRING)
+        WHERE
+          vendor_product_is_deleted = FALSE
+          AND vendor_is_deleted = FALSE
+          AND partner.business_type.business_type_name NOT IN ('Restaurant',
+            'Coffee')
+          AND vp.platform_product_id IS NOT NULL
+          AND partner.partner_status = 'ON_LINE'
+    )
+    WHERE
+      barcodes is not null
+  ),
+  pharma AS (
+    SELECT 
+      orders.order_id,
+      COUNT(DISTINCT d.product.product_id) AS products,
+      COUNT(DISTINCT level_two) AS count_level_two,
+      SUM(d.quantity) AS quantity
+    FROM
+      fact_orders AS orders,
+      UNNEST(details) AS d
+    LEFT JOIN
+      partner_menu
+    ON
+      partner_menu.partner_id = CAST(restaurant.id AS STRING) AND partner_menu.product_id = CAST(d.product.product_id AS STRING)
+    WHERE
+      d.product.name != 'Order reconciliation custom product' 
+    GROUP BY 
+       1
+  ),
+detalle AS (
+  SELECT
+    DATE_SUB(DATE_TRUNC(current_date(), MONTH), INTERVAL 1 DAY) AS fecha,
+    partner_menu.country_name AS country,
+    partner_menu.vertical_segment as vertical_segment,
+    partner_menu.partner_id as partner_id,
+    dim_partner.partner_name as partner_name,
+    d.product.product_id,
+    ltrim(partner_menu.barcodes,"0" ) as barcode,
+    partner_menu.product_name as product_name,
+    partner_menu.level_one as level_one,
+    partner_menu.level_two as level_two,
+    partner_menu.level_three as level_three,
+    d.quantity AS Units,
+    orders.order_id,
+    EXTRACT(DAYOFWEEK FROM orders.registered_date) as dayOfWeek,
+    CASE
+           WHEN EXTRACT(HOUR FROM orders.registered_at) BETWEEN 8  AND 13 THEN 'morning'
+           WHEN EXTRACT(HOUR FROM orders.registered_at) BETWEEN 14 AND 19 THEN 'afternoon'
+           WHEN EXTRACT(HOUR FROM orders.registered_at) BETWEEN 20 AND 23 THEN 'night'
+           WHEN EXTRACT(HOUR FROM orders.registered_at) BETWEEN 0  AND 5  THEN 'mid_night'
+           END as momento_dia,
+           
+    order_in_cart AS order_content_index,
+    sm.mission_type,
+    IFNULL(sm.products_qty,pharma.quantity) AS products_qty,
+    IFNULL(orders.confirmed_gmv / ce.rate_eu,0) AS gmv,
+    products,
+    count_level_two,
+    OC.* EXCEPT (level_one, level_two),
+    orders.registered_at,
+    orders.registered_date,
+    orders.user.id AS user_id
+  FROM fact_orders AS orders,
+  UNNEST(details) AS d
+  LEFT JOIN
+    UNNEST([orders.business_type]) AS fact_orders__business_type
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_country` AS cn ON orders.country_id = cn.country_id AND cn.active
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_currency_exchange` AS ce ON ce.currency_id = cn.currency_id AND ce.currency_exchange_date = DATE_TRUNC(orders.registered_date,MONTH)
+  LEFT JOIN `peya-bi-tools-pro.il_core.dim_partner` AS dim_partner ON dim_partner.partner_id=orders.restaurant.id
+  INNER JOIN partner_menu ON partner_menu.partner_id = CAST(restaurant.id AS STRING) AND partner_menu.product_id = CAST(d.product.product_id AS STRING)
+  LEFT JOIN `peya-food-and-groceries.automated_tables_reports.fact_basket_starters`  starters ON
+    CAST(starters.order_Id AS INT64) = orders.order_id
+    AND starters.product_id = d.product.product_id
+  LEFT JOIN shopping_missions sm
+  ON
+    sm.order_id = orders.order_id
+  LEFT JOIN `peya-data-origins-pro.cl_qcommerce.ocassion_catalog_insights` oc
+  ON 
+    oc.level_one = partner_menu.level_one
+    AND oc.level_two = partner_menu.level_two
+  LEFT JOIN 
+    pharma
+  ON 
+    pharma.order_id = orders.order_id
+  WHERE
+    restaurant.businessType NOT IN ("RESTAURANT",
+      "COFFEE",
+      "COURIER",
+      "COURIER_BUSINESS")
+    AND dim_partner.business_type.business_type_name NOT IN ('Restaurant',
+      'Coffee',
+      'Courier Business')
+    AND d.product.name != 'Order reconciliation custom product'
+  ORDER BY order_id
+),
+starters as (
+  SELECT *
+  FROM (
+    SELECT *,  ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY order_content_index ) AS aux
+    FROM 
+    (
+      SELECT 
+      order_id,
+      level_two as L2_starter,
+      order_content_index
+      FROM
+        detalle d
+      where order_content_index = 1
+      union all
+      SELECT 
+      order_id,
+      level_two as L2_starter,
+      order_content_index,
+      FROM
+        detalle d
+      where order_content_index = 2 )
+)
+WHERE aux = 1
+)
+, 
+auxiliar AS (
+SELECT 
+distinct
+  fecha,
+  country,
+  detalle.order_id,
+  user_id,
+  L2_starter,
+  mission_type,
+  vertical_segment,
+  registered_date,
+  momento_dia,
+  dayOfWeek,
+  products_qty,
+  gmv,
+  COUNT(DISTINCT level_two) AS cantidad_L2,
+  COUNT(DISTINCT CASE WHEN level_two = 'Tobacco' THEN barcode ELSE NULL END) AS cantidad_tobacco,
+  COUNT(DISTINCT barcode) AS barcodes,
+  COUNT(DISTINCT CASE WHEN Me_falta_algo in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Me_falta_algo,
+  COUNT(DISTINCT CASE WHEN Antojo in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Antojo,
+  COUNT(DISTINCT CASE WHEN Modo_regalo in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Modo_regalo,
+  COUNT(DISTINCT CASE WHEN Emergencia in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Emergencia,
+  COUNT(DISTINCT CASE WHEN Preparacion_de_comida in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Preparacion_de_comida,
+  COUNT(DISTINCT CASE WHEN Juntada in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Juntada,
+  COUNT(DISTINCT CASE WHEN Previa in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Previa,
+  COUNT(DISTINCT CASE WHEN Modo_limpieza in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Modo_limpieza,
+  COUNT(DISTINCT CASE WHEN Refill_Bano in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Refill_Bano,
+  COUNT(DISTINCT CASE WHEN Refill_Mascotas in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Refill_Mascotas,
+  COUNT(DISTINCT CASE WHEN Modo_evento in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Modo_evento,
+  COUNT(DISTINCT CASE WHEN Planificando_la_semana in ('Si', 'Starters', 'Importante') THEN barcode ELSE NULL END) AS Planificando_la_semana,
+  COUNT(DISTINCT CASE WHEN Me_falta_algo = 'Importante' THEN barcode ELSE NULL END) AS Importante_Me_falta_algo,
+  COUNT(DISTINCT CASE WHEN Antojo = 'Importante' THEN barcode ELSE NULL END) AS Importante_Antojo,
+  COUNT(DISTINCT CASE WHEN Modo_regalo = 'Importante' THEN barcode ELSE NULL END) AS Importante_Modo_regalo,
+  COUNT(DISTINCT CASE WHEN Emergencia = 'Importante' THEN barcode ELSE NULL END) AS Importante_Emergencia,
+  COUNT(DISTINCT CASE WHEN Preparacion_de_comida = 'Importante' THEN barcode ELSE NULL END) AS Importante_Preparacion_de_comida,
+  COUNT(DISTINCT CASE WHEN Juntada = 'Importante' THEN barcode ELSE NULL END) AS Importante_Juntada,
+  COUNT(DISTINCT CASE WHEN Previa = 'Importante' THEN barcode ELSE NULL END) AS Importante_Previa,
+  COUNT(DISTINCT CASE WHEN Modo_limpieza = 'Importante' THEN barcode ELSE NULL END) AS Importante_Modo_limpieza,
+  COUNT(DISTINCT CASE WHEN Refill_Bano = 'Importante' THEN barcode ELSE NULL END) AS Importante_Refill_Bano,
+  COUNT(DISTINCT CASE WHEN Refill_Mascotas = 'Importante' THEN barcode ELSE NULL END) AS Importante_Refill_Mascotas,
+  COUNT(DISTINCT CASE WHEN Modo_evento = 'Importante' THEN barcode ELSE NULL END) AS Importante_Modo_evento,
+  COUNT(DISTINCT CASE WHEN Planificando_la_semana = 'Importante' THEN barcode ELSE NULL END) AS Importante_Planificando_la_semana,  
+FROM 
+  detalle 
+  LEFT JOIN starters s ON s.order_id =  detalle.order_id
+GROUP BY ALL
+)
+, FINAL AS (
+Select 
+  fecha,
+  country,
+  order_id,
+  CASE 
+    WHEN mission_type = 'stock up' AND vertical_segment = 'Market' and (Planificando_la_semana > 0 OR (cantidad_L2 > 2 and Importante_Planificando_la_semana > Importante_Modo_evento)) THEN 'Planificando_la_semana'
+    WHEN ((mission_type IN ('fill in','instant need')  AND L2_starter = 'Pet') OR (vertical_segment = 'Pets')) THEN 'Refill_mascotas'    
+    
+    WHEN ((mission_type IN ('fill in') AND vertical_segment = 'Market' AND Refill_Bano> 0 and L2_starter in ('Cleaning / Laundry','Disposables', 'Personal Care / Beauty','Health'))
+      OR (products_qty > 3 AND vertical_segment = 'Pharmacy'  AND Refill_Bano> 0 AND L2_starter in ('Cleaning / Laundry','Disposables', 'Personal Care / Beauty','Health','Electronics'))) 
+      OR 
+    ((mission_type IN ('fill in') AND vertical_segment = 'Market' AND Modo_limpieza > 0 AND L2_starter in ('Cleaning / Laundry','Disposables','Household','Electronics'))
+         OR (Emergencia = 0 AND vertical_segment = 'Pharmacy' AND (Modo_limpieza > 0 OR L2_starter in ('Cleaning / Laundry','Disposables','Household','Electronics')))) THEN 'Modo_hogar'
+    WHEN (mission_type IN ('fill in','instant need') AND vertical_segment IN ('Market', 'Drinks', 'Kiosks') AND products_qty > 3 AND Juntada > Preparacion_de_comida AND L2_starter IN ('Juice / Ice Tea / Sports / Energy','Soft Drinks / Mixers','Specialty','Beer / Cider','Pre-Mixed','Spirits',
+'Wine / Sparkling Wine','Ice','Ice Cream / Desserts','Canned / Jarred / Instant Meals','Tobacco','Other Snacks','Salty Snacks','Sweet Bakery','Confectionary') AND (Juntada > 0 OR Importante_Juntada > GREATEST(Importante_Preparacion_de_comida, Importante_Previa))) 
+  OR (mission_type = 'stock up' AND vertical_segment IN ('Market', 'Drinks','Kiosks') AND (Modo_evento > 0 OR Importante_Modo_evento > GREATEST(Importante_Juntada, Importante_Previa, Importante_Planificando_la_semana)))
+THEN 'Juntada'
+        WHEN (mission_type IN ('fill in','instant need') AND vertical_segment IN ('Market', 'Drinks', 'Kiosks') AND L2_starter IN ('Juice / Ice Tea / Sports / Energy','Soft Drinks / Mixers','Specialty','Beer / Cider','Pre-Mixed','Spirits','Wine / Sparkling Wine', 'Ice') AND ((Juntada > 0 OR Importante_Juntada > GREATEST(Importante_Preparacion_de_comida, Importante_Previa)) OR  (Previa > 0 OR Importante_Previa > GREATEST(Importante_Preparacion_de_comida, Importante_Juntada))))
+        OR
+        (mission_type IN ('fill in','instant need') AND vertical_segment IN ('Market', 'Drinks', 'Kiosks') AND momento_dia in ('night', 'mid_night') AND dayOfWeek in (6,7) AND (Previa > 0 OR Importante_Previa > GREATEST(Importante_Preparacion_de_comida, Importante_Juntada)))
+         THEN 'Tomamos_algo'
+    WHEN ((mission_type = 'fill in' OR cantidad_L2 > 3) AND vertical_segment = 'Market' AND products_qty > 3 and (Preparacion_de_comida > 0 OR Importante_Preparacion_de_comida > GREATEST(Importante_Juntada, Importante_Previa))) -- THEN 'Preparacion_de_comida'
+    OR
+    (mission_type IN ('fill in','instant need') AND vertical_segment = 'Market' AND products_qty <= 3  and (Preparacion_de_comida > 0 OR Importante_Preparacion_de_comida > GREATEST(Importante_Juntada, Importante_Previa)))
+    THEN 'Preparacion_de_comida'
+    WHEN vertical_segment = 'Pharmacy' and products_qty <= 3 and Emergencia > 0 AND L2_starter in ('Baby','Health') THEN 'Emergencia'
+    WHEN vertical_segment = 'Pharmacy' and Emergencia > 0 --AND L2_starter in ('Baby','Health', 'Personal Care / Beauty') 
+    THEN 'Botiquin'
+    WHEN (mission_type = 'instant need' OR mission_type IS NULL) AND vertical_segment IN ('Market', 'Drinks', 'Kiosks','Shop') AND ((Antojo > 0 AND L2_starter in ('Soft Drinks / Mixers','Juice / Ice Tea / Sports / Energy', 'Sweet Bakery', 'Beer / Cider', 'Spirits', 'Wine / Sparkling Wine', 'Ice Cream / Desserts', 'Salty Snacks', 'Other Snacks', 'Confectionary')) OR (Importante_Antojo > GREATEST(Importante_Me_falta_algo, Importante_Previa)))  and cantidad_tobacco = 0 THEN 'Antojo'
+    WHEN (mission_type = 'instant need' and Me_falta_algo > 0 AND vertical_segment  IN ('Market', 'Drinks', 'Kiosks','Shop') AND cantidad_L2 <= 3  and products_qty <= 5 ) 
+    OR
+    ( Me_falta_algo > 0 AND vertical_segment  IN ('Market', 'Drinks', 'Kiosks','Shop') AND cantidad_L2 <= 3  and products_qty <= 5 ) 
+    OR
+    (mission_type = 'instant need' AND vertical_segment  IN ('Market') AND L2_starter IN ('Dairy / Eggs', 'Deli / Snacking', 'Milk','Fish / Seafood',
+    'Meat','Poultry','Fruit','Prepared F&V / Fresh Herbs','Vegetables'))
+    OR
+    (mission_type IN ('fill in','instant need') and Me_falta_algo > 0 AND vertical_segment  IN ('Market', 'Drinks', 'Kiosks','Shop') AND L2_starter IN ('Water'))
+    OR
+    (vertical_segment  IN ('Shop') AND L2_starter IN ('Pet'))
+    THEN 'Me_falta_algo'
+  WHEN (mission_type IN ('instant need') OR mission_type IS NULL ) AND Modo_regalo > 0  THEN 'Modo_regalo_modo_creativo'
+  WHEN mission_type IN ('fill in','instant need') AND L2_starter IN ('Food') THEN 'Comida_express'
+    --WHEN mission_type = 'instant need' and Me_falta_algo_frescos > 0 AND vertical_segment  IN ('Market') AND cantidad_L2 <= 3  and products_qty <= 5  THEN 'Me_falta_algo_frescos'
+    ELSE 'Revisar'
+    END AS oportunidad_consumo,
+  * EXCEPT (order_id, country, fecha)
+  from auxiliar 
+  order by 1
+  )
+SELECT 
+  CAST(fecha AS STRING) AS date_information,
+  country,
+  order_id,
+  user_id,
+  gmv  AS gmv_euro_order,
+  products_qty AS products_qty_order,
+  oportunidad_consumo AS consumption_occasion,
+  registered_date AS date_order,
+FROM 
+  FINAL 

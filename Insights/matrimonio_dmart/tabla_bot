@@ -1,0 +1,111 @@
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_campaign_automation` 
+
+WITH brand_cpg_exception_list AS (
+  SELECT
+    *
+  FROM
+    `peya-data-origins-pro.cl_qcommerce.cpg_brand_mapping_exceptional_list` el
+  QUALIFY ROW_NUMBER() OVER latest_update = 1
+    WINDOW latest_update AS (
+    PARTITION BY global_entity_id, product_cpg, product_brand
+    ORDER BY COALESCE(
+    SAFE.PARSE_DATE('%d/%m/%Y', is_updated_by_central),
+    SAFE.PARSE_DATE('%m/%d/%Y', is_updated_by_central)
+) DESC NULLS LAST)
+  ORDER BY
+    1,2,3
+),
+
+qc_catalog_products AS (
+    SELECT
+      qc.global_entity_id,
+      catalog_chain_id,
+      qc.product_name,
+      qc.sku,
+      pim.product_id AS master_code,
+      CASE
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") = False THEN SUBSTR(b.barcode,1,INSTR(b.barcode,',')-1)
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") THEN SUBSTR(b.barcode,2,INSTR(b.barcode,',')-2)
+        ELSE b.barcode
+      END AS barcode,
+      COALESCE(sel.correct_product_cpg, el.correct_product_cpg, pim.brand_owner_name, 'Others') AS product_cpg,
+      COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') AS product_brand,
+      c.master_category_names.level_one,
+      c.master_category_names.level_two,
+      c.master_category_names.level_three,
+      vp.platform_vendor_id AS platform_vendor_id,
+      vp.catalog_price_lc AS catalog_price_lc,
+    FROM `peya-data-origins-pro.cl_dmarts.qc_catalog_products` AS qc
+    ,UNNEST(barcodes) AS b
+    ,UNNEST(vendor_products) AS vp
+    ,UNNEST(master_categories) AS c
+    LEFT JOIN
+      `peya-data-origins-pro.cl_dmarts.pim_product` pim
+    ON
+      pim.product_id = qc.pim_product_id
+    LEFT JOIN brand_cpg_exception_list  AS el
+      ON qc.global_entity_id = el.global_entity_id
+      AND COALESCE(pim.brand_owner_name, 'Others') = el.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = INITCAP(el.product_brand)
+    LEFT JOIN `peya-data-origins-pro.cl_qcommerce.cpg_barcode_mapping_exceptional_list` AS sel
+      ON qc.global_entity_id = sel.global_entity_id
+      AND COALESCE(el.correct_product_cpg, pim.brand_owner_name, 'Others') = sel.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = sel.product_brand
+      AND (CASE
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") = False THEN SUBSTR(b.barcode,1,INSTR(b.barcode,',')-1)
+        WHEN INSTR(b.barcode,',') > 0 AND STARTS_WITH(b.barcode, "0") THEN SUBSTR(b.barcode,2,INSTR(b.barcode,',')-2)
+        ELSE b.barcode
+      END) = sel.barcode
+    WHERE
+      vp.is_dmart
+    AND
+      vp.vendor_product_is_active
+    QUALIFY ROW_NUMBER() OVER latest_chain = 1
+    WINDOW latest_chain AS (
+    PARTITION BY qc.global_entity_id, qc.sku, vp.warehouse_id, vp.platform_vendor_id
+    ORDER BY qc.chain_product_created_at_utc DESC NULLS LAST)
+),
+
+productos_a_agregar AS (
+SELECT
+  DISTINCT
+    catalog_chain_id, sku
+FROM
+  qc_catalog_products
+WHERE
+  product_cpg = 'Diageo'
+AND
+  global_entity_id = 'PY_AR'
+AND
+  barcode IS NOT NULL
+AND
+  level_three = 'Vodka'
+AND
+  barcode IS NOT NULL
+AND
+  ltrim(barcode,"0") NOT LIKE "2%")
+
+SELECT
+  'Argentina' as Country,
+  'Grupo Peñaflor' as Account,
+  'Argentina Wallet_LSHOP (ARS)' as Wallet,
+  'MS_Dmarts_test_1' as Campaign_Name,
+  'Biddable' as Pricing_Model,
+  'Product Ad' as Campaign_Type,
+  'Sub-category' as Asset_Type,
+  DATE('2025-12-20') as Start_Date,
+  DATE('2025-12-20') as End_Date,
+  ARRAY_AGG(
+    STRUCT(
+      sku AS sku,
+      catalog_chain_id AS chainId
+    )
+  ) AS SKU_File_Path,
+
+  ARRAY<STRING>[] as Keywords,
+  50000 as Total_Budget,
+  NULL as Daily_Budget,
+  570 as Default_CPC_Budget,
+  CURRENT_DATE() as ingestion_date
+FROM
+  productos_a_agregar

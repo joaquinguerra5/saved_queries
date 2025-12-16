@@ -1,0 +1,53 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.analisis_pepsico_plataforma` 
+
+PARTITION BY date
+
+AS
+
+WITH sesiones AS
+(SELECT
+  DATE(session_start_timestamp_local) as date,
+  EXTRACT(dayofweek from DATE(session_start_timestamp_local)) as day_of_week,
+  country.country_name,
+  EXTRACT(DAYOFWEEK FROM session_start_timestamp_local) as dayofweek,
+  COUNT(DISTINCT session_sk) as sesiones,
+  COUNT(DISTINCT user_id) as usuarios_sesion
+FROM
+  `peya-bi-tools-pro.il_sessions.fact_perseus_sessions`
+WHERE
+  partition_date BETWEEN '2023-12-01' AND '2025-11-26'
+AND
+  country.country_name IN ('Argentina','Chile','República Dominicana')
+AND
+  DATE(session_start_timestamp_local) BETWEEN '2024-01-01' AND '2025-10-31'
+GROUP BY
+1,2,3,4),
+
+orders AS (
+  SELECT
+    registered_date as date,
+    EXTRACT(dayofweek from registered_date) as day_of_week,
+    country.country_name,
+    COUNT(DISTINCT order_id) as orders,
+    COUNT(DISTINCT user.id) as users_orders
+  FROM
+    `peya-bi-tools-pro.il_core.fact_orders` fo
+  WHERE
+    registered_date between '2024-01-01' AND '2025-10-31'
+  AND
+    order_status = 'CONFIRMED'
+  GROUP BY
+    1,2,3
+)
+
+SELECT
+  s.*,
+  o.orders,
+  o.users_orders
+FROM
+  sesiones s
+LEFT JOIN
+  orders o
+ON
+  s.date = o.date AND s.country_name = o.country_name
+
