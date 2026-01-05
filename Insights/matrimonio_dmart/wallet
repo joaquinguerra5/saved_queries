@@ -1,0 +1,310 @@
+DECLARE month_from DATE DEFAULT DATE_TRUNC(CURRENT_DATE(),MONTH);
+DECLARE month_to DATE DEFAULT LAST_DAY(CURRENT_DATE(),MONTH);
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_wallets_dmarts`
+
+-- PARTITION BY month
+
+-- CLUSTER BY
+--   contract_id,account_name
+
+-- AS
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_wallets_dmarts`
+
+ 
+WITH 
+
+contracts_cpg AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'CPG'
+  AND
+    brands is not null
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+),
+
+
+contracts_supplier AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'Proveedor'
+  AND
+    brands is not null
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+),
+
+contracts_cpg_all AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'CPG'
+  AND
+    brands IS NULL
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+
+),
+
+contracts_supplier_all AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'Proveedor'
+  AND
+    brands IS NULL
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+),
+
+brand_cpg_exception_list AS (
+  SELECT
+    *
+  FROM
+    `peya-data-origins-pro.cl_qcommerce.cpg_brand_mapping_exceptional_list` el
+  QUALIFY ROW_NUMBER() OVER latest_update = 1
+    WINDOW latest_update AS (
+    PARTITION BY global_entity_id, product_cpg, product_brand
+    ORDER BY COALESCE(
+    SAFE.PARSE_DATE('%d/%m/%Y', is_updated_by_central),
+    SAFE.PARSE_DATE('%m/%d/%Y', is_updated_by_central)
+) DESC NULLS LAST)
+  ORDER BY
+    1,2,3
+),
+
+qc_catalog_products AS (
+    SELECT
+      warehouse_id,
+      qc.sku,
+      pim.product_id AS master_code,
+      CASE
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") = False THEN SUBSTR(qc.barcodes,1,INSTR(qc.barcodes,',')-1)
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") THEN SUBSTR(qc.barcodes,2,INSTR(qc.barcodes,',')-2)
+        ELSE qc.barcodes
+      END AS barcode,
+      COALESCE(sel.correct_product_cpg, el.correct_product_cpg, pim.brand_owner_name, 'Others') AS product_cpg,
+      COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') AS product_brand,
+      pci,
+      pc AS l1_front,
+      c as l2_front,
+    FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` AS qc
+    CROSS JOIN UNNEST(category_name) AS c WITH OFFSET AS pos1
+    CROSS JOIN UNNEST(parent_category_name) AS pc WITH OFFSET AS pos2
+    CROSS JOIN UNNEST(parent_category_id) AS pci WITH OFFSET AS pos3
+    LEFT JOIN
+      `peya-data-origins-pro.cl_dmarts.pim_product` pim
+    ON
+      pim.product_id = qc.master_code
+    LEFT JOIN brand_cpg_exception_list  AS el
+      ON qc.global_entity_id = el.global_entity_id
+      AND COALESCE(pim.brand_owner_name, 'Others') = el.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = INITCAP(el.product_brand)
+    LEFT JOIN `peya-data-origins-pro.cl_qcommerce.cpg_barcode_mapping_exceptional_list` AS sel
+      ON qc.global_entity_id = sel.global_entity_id
+      AND COALESCE(el.correct_product_cpg, pim.brand_owner_name, 'Others') = sel.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = sel.product_brand
+      AND (CASE
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") = False THEN SUBSTR(qc.barcodes,1,INSTR(qc.barcodes,',')-1)
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") THEN SUBSTR(qc.barcodes,2,INSTR(qc.barcodes,',')-2)
+        ELSE qc.barcodes
+      END) = sel.barcode
+    WHERE
+      pos1 = pos2
+    AND
+      pos1 = pos3
+    AND
+      is_dmart
+    AND
+      status = 'ACTIVE'
+    QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY warehouse_id, qc.sku, pim.product_id
+  ORDER BY pci ASC, pos1 ASC
+) = 1
+),
+
+
+supplier_sell_in AS
+(SELECT
+    dc.country_name,
+    supplier_id,
+    supplier_name,
+    supplier_finance_id,
+    products.product_brand,
+    products.l1_front,
+    products.l2_front,
+    SUM(received_amount_lc) as sell_in
+    -- DISTINCT po_status
+FROM
+  `peya-datamarts-pro.dm_dmarts.dmarts_purchase_orders_sku_level` dpo
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  lower(dc.country_code) = lower(dpo.country_code)
+LEFT JOIN
+  qc_catalog_products products
+ON
+  products.sku = dpo.sku_id AND products.warehouse_id = dpo.warehouse_id
+WHERE
+  po_creation_date BETWEEN DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH) AND LAST_DAY(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH)
+GROUP BY
+  ALL),
+
+
+cpg_sell_in AS
+(SELECT
+    dc.country_name,
+    products.product_cpg,
+    products.product_brand,
+    products.l1_front,
+    products.l2_front,
+    SUM(received_amount_lc) as sell_in
+    -- DISTINCT po_status
+FROM
+  `peya-datamarts-pro.dm_dmarts.dmarts_purchase_orders_sku_level` dpo
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  lower(dc.country_code) = lower(dpo.country_code)
+LEFT JOIN
+  qc_catalog_products products
+ON
+  products.sku = dpo.sku_id AND products.warehouse_id = dpo.warehouse_id
+WHERE
+  po_creation_date BETWEEN DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH) AND LAST_DAY(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH)
+AND
+  COALESCE(product_cpg,"Others") NOT IN ('Others','Unbranded')
+GROUP BY
+  ALL
+)
+
+
+SELECT
+  month_to as month,
+  *
+FROM
+(
+SELECT
+  cc.country_name,
+  cc.contract_id,
+  cc.account_name,
+  cc.wallet,
+  cc.implementador,
+  type,
+  cpg as cpg_supplier_name,
+  l1_front,
+  l2_front,
+  pct_sell_in,
+  SUM(sell_in) as sell_in,
+  SUM(sell_in) * SAFE_DIVIDE(pct_sell_in,100) as monthly_wallet_value
+FROM
+  contracts_cpg cc
+LEFT JOIN
+  cpg_sell_in csi
+ON
+  cc.country_name = csi.country_name AND cc.cpg = csi.product_cpg AND lower(cc.brands) = lower(csi.product_brand)
+-- WHERE
+--   cc.country_name = 'Uruguay'
+GROUP BY ALL
+
+UNION ALL
+
+SELECT
+  cs.country_name,
+  type,
+  cs.contract_id,
+  cs.account_name,
+  cs.wallet,
+  cs.implementador,
+  supplier as cpg_supplier_name,
+  l1_front,
+  l2_front,
+  pct_sell_in,
+  SUM(sell_in) as sell_in,
+  SUM(sell_in) * SAFE_DIVIDE(pct_sell_in,100) as monthly_wallet_value
+FROM
+  contracts_supplier cs
+LEFT JOIN
+  supplier_sell_in ssi
+ON
+  cs.country_name = ssi.country_name AND cs.supplier = ssi.supplier_name AND lower(cs.brands) = lower(ssi.product_brand)
+-- WHERE
+--   cc.country_name = 'Uruguay'
+GROUP BY ALL
+
+UNION ALL
+
+SELECT
+  cc.country_name,
+  cc.contract_id,
+  cc.account_name,
+  cc.wallet,
+  cc.implementador,
+  type,
+  cpg as cpg_supplier_name,
+  l1_front,
+  l2_front,
+  pct_sell_in,
+  SUM(sell_in) as sell_in,
+  SUM(sell_in) * SAFE_DIVIDE(pct_sell_in,100) as monthly_wallet_value
+FROM
+  contracts_cpg_all cc
+LEFT JOIN
+  cpg_sell_in csi
+ON
+  cc.country_name = csi.country_name AND cc.cpg = csi.product_cpg -- AND cc.brands = csi.product_brand
+GROUP BY ALL
+
+UNION ALL
+
+SELECT
+  cs.country_name,
+  cs.contract_id,
+  cs.account_name,
+  cs.wallet,
+  cs.implementador,
+  type,
+  supplier as cpg_supplier_name,
+  l1_front,
+  l2_front,
+  pct_sell_in,
+  SUM(sell_in) as sell_in,
+  SUM(sell_in) * SAFE_DIVIDE(pct_sell_in,100) as monthly_wallet_value
+FROM
+  contracts_supplier_all cs
+LEFT JOIN
+  supplier_sell_in ssi
+ON
+  cs.country_name = ssi.country_name AND cs.supplier = ssi.supplier_name --AND  cs.brands = ssi.product_brand
+GROUP BY ALL
+)
+WHERE
+  l1_front IS NOT NULL
+AND
+  l2_front IS NOT NULL
+AND
+  COALESCE(sell_in,0) >0

@@ -1,0 +1,245 @@
+DECLARE date_from DATE DEFAULT DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH);
+DECLARE date_to DATE DEFAULT DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH);
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_campaign_automation`
+
+-- CLUSTER BY Country
+
+-- AS 
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_campaign_automation`
+
+WITH
+clicks_split AS (
+  SELECT
+    dp.country.country_name,
+    dvp.sku,
+    dvp.product_name,
+    SUM(search_clicks) as search_clicks,
+    SUM(category_clicks) as cat_clicks
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_clicks_traffic_split` s
+  LEFT JOIN
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+  ON
+    SAFE_CAST(dvp.remote_vendor_id AS STRING) = shopid AND SAFE_CAST(dvp.remote_product_id AS STRING) = productsku
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_partner` dp
+  ON
+    s.shopid = SAFE_CAST(dp.partner_id AS STRING)
+  WHERE
+    date BETWEEN date_from AND date_to
+  GROUP BY
+    1,2,3
+),
+
+-- OBTENEMOS LAS KEYWORDS MAS RELEVANTES POR PAIS/L1 FRONT / L2 FRONT
+base_keywords AS (
+  SELECT
+    country as country_name,
+    category_name as l1_front,
+    subCategory_name as l2_front,
+    SearchTerm,
+    SUM(clicks) as clicks
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_search_and_clicks_by_product_partitioned_recent`
+  WHERE
+    date BETWEEN date_from AND date_to
+  AND
+    Partnertype = 'Dmart'
+  GROUP BY
+    ALL),
+
+ranked_keywords AS (
+  SELECT
+    *,
+
+    SUM(clicks) OVER (PARTITION BY country_name, l1_front, l2_front) AS total_clicks,
+
+    ROW_NUMBER() OVER (
+      PARTITION BY country_name, l1_front, l2_front
+      ORDER BY clicks DESC, SearchTerm
+    ) AS rn,
+
+    SUM(clicks) OVER (
+      PARTITION BY country_name, l1_front, l2_front
+      ORDER BY clicks DESC, SearchTerm
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cum_clicks,
+
+    SUM(clicks) OVER (
+      PARTITION BY country_name, l1_front, l2_front
+      ORDER BY clicks DESC, SearchTerm
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ) AS prev_cum_clicks
+  FROM base_keywords
+),
+
+final_keywords AS (
+  SELECT
+    country_name,
+    l1_front,
+    l2_front, 
+    ARRAY_AGG(SearchTerm) as searchTerms
+  FROM 
+    ranked_keywords
+  WHERE 
+    rn <= 5
+    AND COALESCE(SAFE_DIVIDE(prev_cum_clicks, total_clicks), 0) < 0.60
+  GROUP BY
+    1,2,3
+
+),
+
+skus_contract AS (
+  SELECT
+  contract_id,
+  ARRAY_AGG(STRUCT (sku as sku, chain_id as chainId)) as skus
+FROM
+  `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_automation_skus` skus
+WHERE
+  month = LAST_DAY(CURRENT_DATE(),MONTH)
+GROUP BY
+  1
+),
+
+skus AS 
+(SELECT
+  skus.*,
+  cs.cat_clicks,
+  cs.search_clicks
+FROM
+  `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_automation_skus` skus
+LEFT JOIN
+  clicks_split cs
+ON
+  skus.country_name = cs.country_name AND skus.sku = cs.sku
+WHERE
+  month = LAST_DAY(CURRENT_DATE(),MONTH)),
+
+keyword_campaigns AS
+(SELECT 
+  w.*,
+  --ARRAY_AGG(DISTINCT SearchTerm) AS search_terms,
+  ARRAY_AGG(
+    STRUCT(
+            sku AS sku,
+      chain_id AS chainId
+    )
+  ) as skus,
+  k.searchTerms as Keywords,
+  SUM(skus.cat_clicks)/SUM(skus.cat_clicks+skus.search_clicks) as cat_clicks_share,
+  SUM(skus.search_clicks)/SUM(skus.cat_clicks+skus.search_clicks) as search_clicks_share,
+  SUM(skus.search_clicks)/SUM(skus.cat_clicks+skus.search_clicks)*monthly_wallet_value as  Total_Budget  
+FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_wallets_dmarts` w
+LEFT JOIN
+  skus
+ON
+  w.contract_id = skus.contract_id AND w.l1_front = skus.l1_front AND w.l2_front = skus.l2_front AND LAST_DAY(w.month,MONTH) = skus.month
+LEFT JOIN
+  final_keywords k
+ON
+  k.country_name = w.country_name AND k.l1_front = w.l1_front AND k.l2_front = w.l2_front
+WHERE
+  w.month = LAST_DAY(CURRENT_DATE(),MONTH)
+GROUP BY
+  ALL
+HAVING
+  cat_clicks_share + search_clicks_share = 1),
+
+sp_budget AS (
+SELECT
+  * EXCEPT(l1_front,l2_front,sell_in,monthly_wallet_value,cat_clicks_share,Total_Budget),
+  SUM(sell_in) as sell_in,
+  SUM(monthly_wallet_value) as monthly_wallet_value,
+  SUM(Total_Budget) as Total_Budget
+FROM
+(SELECT 
+  w.*,
+  SUM(skus.cat_clicks)/SUM(skus.cat_clicks+skus.search_clicks) as cat_clicks_share,
+  SUM(skus.cat_clicks)/SUM(skus.cat_clicks+skus.search_clicks)*monthly_wallet_value as  Total_Budget  
+FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_wallets_dmarts` w
+LEFT JOIN
+  skus
+ON
+  w.contract_id = skus.contract_id AND w.l1_front = skus.l1_front AND w.l2_front = skus.l2_front AND LAST_DAY(w.month,MONTH) = skus.month
+LEFT JOIN
+  final_keywords k
+ON
+  k.country_name = w.country_name AND k.l1_front = w.l1_front AND k.l2_front = w.l2_front
+WHERE
+  w.month = LAST_DAY(CURRENT_DATE(),MONTH)
+GROUP BY
+  ALL
+HAVING
+  cat_clicks_share > 0)
+GROUP BY
+  ALL
+),
+
+sp_campaigns_cat AS (
+  SELECT
+    sp_budget.*,
+    skus_contract.skus
+  FROM
+    sp_budget
+  LEFT JOIN
+    skus_contract
+  USING(contract_id)
+)
+
+SELECT
+  c.country_name as Country,
+  c.account_name as Account,
+  c.wallet as Wallet,
+  CONCAT('MS_Dmarts_SP_',EXTRACT(YEAR FROM CURRENT_DATE()),"-",EXTRACT(MONTH FROM CURRENT_DATE()),"_",contract_id) as Campaign_Name,
+  'Biddable' as Pricing_Model,
+  'Product Ad' as Campaign_Type,
+  'Sub-Category' as Asset_Type,
+  DATE_TRUNC(CURRENT_DATE(),MONTH) as Start_Date,
+  LAST_DAY(CURRENT_DATE(),MONTH) as End_Date,
+  skus as Skus,
+  NULL as Keywords,
+  Total_Budget,
+  NULL as Daily_Budget,
+  fp.Sponsored_Products as Default_CPC_Budget,
+  CURRENT_DATE() as ingestion_date,
+  contract_id,
+  c.implementador
+FROM
+  sp_campaigns_cat c
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_floor_price` fp
+ON
+  c.country_name = fp.country
+-- WHERE
+--   contract_id = 'P-20251230-1306-MALATICSALUS'
+
+UNION ALL
+
+SELECT
+  c.country_name as Country,
+  c.account_name as Account,
+  c.wallet as Wallet,
+  CONCAT('MS_Dmarts_Search_',EXTRACT(YEAR FROM CURRENT_DATE()),"-",EXTRACT(MONTH FROM CURRENT_DATE()),"_",contract_id,"_",l1_front,"_",l2_front) as Campaign_Name,
+  'Biddable' as Pricing_Model,
+  'Product Ad' as Campaign_Type,
+  'Search' as Asset_Type,
+  DATE_TRUNC(CURRENT_DATE(),MONTH) as Start_Date,
+  LAST_DAY(CURRENT_DATE(),MONTH) as End_Date,
+  skus as Skus,
+  keywords as Keywords,
+  Total_Budget,
+  NULL as Daily_Budget,
+  fp.Search as Default_CPC_Budget,
+  CURRENT_DATE() as ingestion_date,
+  contract_id,
+  c.implementador
+FROM
+  keyword_campaigns c
+LEFT JOIN
+  `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_floor_price` fp
+ON
+  c.country_name = fp.country
+-- WHERE
+--   contract_id = 'P-20251230-1306-MALATICSALUS'

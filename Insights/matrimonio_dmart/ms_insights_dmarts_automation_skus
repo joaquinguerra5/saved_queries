@@ -1,0 +1,335 @@
+DECLARE month_from DATE DEFAULT DATE_TRUNC(CURRENT_DATE(),MONTH);
+DECLARE month_to DATE DEFAULT LAST_DAY(CURRENT_DATE(),MONTH);
+DECLARE ROAS_TH FLOAT64 DEFAULT 2.5;
+--DECLARE CAT_CUM_TH FLOAT64 DEFAULT 0.80;
+DECLARE PROD_CUM_TH FLOAT64 DEFAULT 0.80;
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_automation_skus`
+
+-- PARTITION BY month
+
+-- CLUSTER BY
+--   country_name, contract_id
+
+-- AS
+
+-- WITH 
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_automation_skus`
+
+WITH
+
+contracts_cpg AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'CPG'
+  AND
+    brands is not null
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+
+),
+
+contracts_supplier AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'Proveedor'
+  AND
+    brands is not null
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+),
+
+contracts_cpg_all AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'CPG'
+  AND
+    brands IS NULL
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+
+),
+
+contracts_supplier_all AS (
+  SELECT
+    c.* EXCEPT(brands_array), brands
+  FROM
+    `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
+  LEFT JOIN UNNEST(brands_array) brands
+  WHERE
+    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+  AND
+    type = 'Proveedor'
+  AND
+    brands IS NULL
+  AND
+    c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
+),
+
+
+
+
+brand_cpg_exception_list AS (
+  SELECT
+    *
+  FROM
+    `peya-data-origins-pro.cl_qcommerce.cpg_brand_mapping_exceptional_list` el
+  QUALIFY ROW_NUMBER() OVER latest_update = 1
+    WINDOW latest_update AS (
+    PARTITION BY global_entity_id, product_cpg, product_brand
+    ORDER BY COALESCE(
+    SAFE.PARSE_DATE('%d/%m/%Y', is_updated_by_central),
+    SAFE.PARSE_DATE('%m/%d/%Y', is_updated_by_central)
+) DESC NULLS LAST)
+  ORDER BY
+    1,2,3
+),
+
+qc_catalog_products AS (
+    SELECT
+      DISTINCT
+      qc.sku,
+      qc.chain_id,
+      qc.country_code,
+      pim.product_id AS master_code,
+      CASE
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") = False THEN SUBSTR(qc.barcodes,1,INSTR(qc.barcodes,',')-1)
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") THEN SUBSTR(qc.barcodes,2,INSTR(qc.barcodes,',')-2)
+        ELSE qc.barcodes
+      END AS barcode,
+      pci,
+      pc AS parent_category,
+      c as category_name,
+      COALESCE(sel.correct_product_cpg, el.correct_product_cpg, pim.brand_owner_name, 'Others') AS product_cpg,
+      COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') AS product_brand,
+    FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` AS qc
+    CROSS JOIN UNNEST(category_name) AS c WITH OFFSET AS pos1
+    CROSS JOIN UNNEST(parent_category_name) AS pc WITH OFFSET AS pos2
+    CROSS JOIN UNNEST(parent_category_id) AS pci WITH OFFSET AS pos3
+    LEFT JOIN
+      `peya-data-origins-pro.cl_dmarts.pim_product` pim
+    ON
+      pim.product_id = qc.master_code
+    LEFT JOIN brand_cpg_exception_list  AS el
+      ON qc.global_entity_id = el.global_entity_id
+      AND COALESCE(pim.brand_owner_name, 'Others') = el.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = INITCAP(el.product_brand)
+    LEFT JOIN `peya-data-origins-pro.cl_qcommerce.cpg_barcode_mapping_exceptional_list` AS sel
+      ON qc.global_entity_id = sel.global_entity_id
+      AND COALESCE(el.correct_product_cpg, pim.brand_owner_name, 'Others') = sel.product_cpg
+      AND COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') = sel.product_brand
+      AND (CASE
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") = False THEN SUBSTR(qc.barcodes,1,INSTR(qc.barcodes,',')-1)
+        WHEN INSTR(qc.barcodes,',') > 0 AND STARTS_WITH(qc.barcodes, "0") THEN SUBSTR(qc.barcodes,2,INSTR(qc.barcodes,',')-2)
+        ELSE qc.barcodes
+      END) = sel.barcode
+    WHERE
+      pos1 = pos2
+    AND
+      c IS NOT NULL
+    AND
+      qc.is_dmart
+    AND
+      vendor_is_online
+    AND
+      status = 'ACTIVE'
+    AND
+      COALESCE(INITCAP(qc.brand_name), INITCAP(pim.brands_name), 'Others') NOT IN ('Unbranded','Others','Marca Dummy','Pedidos Ya')
+    QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY warehouse_id, qc.sku, pim.product_id
+  ORDER BY pci ASC, pos1 ASC
+) = 1
+),
+
+
+base_prods AS (
+  SELECT
+    r.country_code,
+    p.chain_id,
+    brand_name,
+    cpg,
+    level_one,
+    level_two,
+    r.master_code,
+    r.product_name,
+    r.barcode,
+    p.sku,
+    p.parent_category l1_front,
+    p.category_name l2_front,
+    clicks,
+    avg_prod_bvalue,
+    clicks_orden,
+    cpc,
+    SAFE_DIVIDE(avg_prod_bvalue, clicks_orden * cpc) AS roas
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_garantia_roas` r
+  LEFT JOIN
+    qc_catalog_products p
+  ON
+    p.master_code = r.master_code AND lower(r.country_code) = lower(p.country_code)
+  WHERE clicks IS NOT NULL AND clicks > 0
+    AND r.barcode IS NOT NULL
+    AND p.master_code IS NOT NULL
+),
+
+-- 2) Productos dentro de esas categorías, ordenados priorizando clicks
+prod AS (
+  SELECT
+    b.country_code,
+    b.chain_id,
+    b.brand_name,
+    b.cpg,
+    b.l1_front,
+    b.l2_front,
+    b.barcode,
+    b.sku,
+    ANY_VALUE(b.product_name) AS product_name,
+    SUM(b.clicks) AS clicks_prod,
+    -- roas “representativo”: ponderado por clicks (más estable que ANY_VALUE)
+    SAFE_DIVIDE(SUM(b.roas * b.clicks), SUM(b.clicks)) AS roas_prod,
+    MAX(IF(b.roas >= ROAS_TH, 1, 0)) AS is_roas_250
+  FROM base_prods b
+  GROUP BY 1,2,3,4,5,6,7,8
+),
+
+
+
+prod_keep AS 
+(SELECT
+  *
+FROM
+(  SELECT
+    *,
+    SUM(clicks_prod) OVER (PARTITION BY country_code, brand_name) AS clicks_brand_total,
+    SUM(clicks_prod) OVER (
+      PARTITION BY country_code, brand_name
+      ORDER BY clicks_prod DESC, barcode
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS clicks_prod_cum,
+    SUM(clicks_prod) OVER (
+      PARTITION BY country_code, brand_name
+      ORDER BY clicks_prod DESC, barcode
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ) AS prev_clicks_prod_cum,
+    SAFE_DIVIDE(SUM(clicks_prod) OVER (
+      PARTITION BY country_code, brand_name
+      ORDER BY clicks_prod DESC, barcode
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ),SUM(clicks_prod) OVER (PARTITION BY country_code, brand_name)) as cum_share_clicks_in_brand,
+    SAFE_DIVIDE(SUM(clicks_prod) OVER (
+      PARTITION BY country_code, brand_name
+      ORDER BY clicks_prod DESC, barcode
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ),SUM(clicks_prod) OVER (PARTITION BY country_code, brand_name)) as prev_cum_share_clicks_in_brand
+  FROM prod )
+WHERE
+  cum_share_clicks_in_brand <= PROD_CUM_TH
+ OR
+  prev_cum_share_clicks_in_brand <= PROD_CUM_TH
+),
+
+supplier_skus AS
+(SELECT
+    LAST_DAY(CURRENT_DATE(),MONTH) as month,
+    dpo.country_name,
+    chain_id,
+    COALESCE(c.contract_id,ca.contract_id) as contract_id,
+    --supplier_id,
+    supplier_name as cpg_supplier_name,
+    --supplier_finance_id,
+    pk.brand_name,
+    pk.product_name,
+    dpo.barcode,
+    pk.sku,
+    pk.l1_front,
+    pk.l2_front,
+    pk.clicks_prod,
+    pk.roas_prod
+FROM
+  `peya-datamarts-pro.dm_dmarts.dmarts_purchase_orders_sku_level` dpo
+LEFT JOIN
+  prod_keep pk
+ON
+  ltrim(pk.barcode,"0") = ltrim(dpo.barcode,"0") AND lower(pk.country_code) = lower(dpo.country_code)
+LEFT JOIN
+    contracts_supplier c
+  ON
+    c.supplier = dpo.supplier_name AND lower(c.country_name) = lower(dpo.country_name) AND lower(c.brands) = lower(pk.brand_name)
+LEFT JOIN
+    contracts_supplier_all ca
+  ON
+    ca.supplier = dpo.supplier_name AND lower(ca.country_name) = lower(dpo.country_name)
+WHERE
+  po_creation_date BETWEEN DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH) AND LAST_DAY(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH)
+AND
+  pk.brand_name IS NOT NULL
+AND
+  (c.type IS NOT NULL OR ca.type IS NOT NULL)
+GROUP BY
+  ALL),
+
+cpg_skus AS (
+  SELECT
+    LAST_DAY(CURRENT_DATE(),MONTH) as month,
+    dc.country_name,
+    chain_id,
+    COALESCE(c.contract_id,ca.contract_id) as contract_id,
+    pk.cpg cpg_supplier_name,
+    pk.brand_name,
+    pk.product_name,
+    pk.barcode,
+    pk.sku,
+    pk.l1_front,
+    pk.l2_front,
+    pk.clicks_prod,
+    pk.roas_prod
+  FROM
+    prod_keep pk
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_country` dc
+  ON
+    dc.country_code = pk.country_code
+  LEFT JOIN
+    contracts_cpg c
+  ON
+    c.cpg = pk.cpg AND lower(c.country_name) = lower(dc.country_name) AND lower(c.brands) = lower(pk.brand_name)
+  LEFT JOIN
+      contracts_cpg_all ca
+    ON
+      ca.cpg = pk.cpg AND lower(ca.country_name) = lower(dc.country_name)
+  WHERE
+    brand_name IS NOT NULL
+  AND
+    (c.type IS NOT NULL OR ca.type IS NOT NULL)
+  
+)
+
+SELECT
+  *
+FROM
+  supplier_skus
+
+UNION ALL
+
+SELECT
+  *
+FROM
+  cpg_skus 

@@ -1,0 +1,33 @@
+CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_clicks_traffic_split`
+
+PARTITION BY date
+
+CLUSTER BY shopid
+
+AS
+
+SELECT  
+            DATE(e.payload_timestamp_local) as date,
+            shopid,
+            productSku,
+            --REGEXP_REPLACE(LOWER(STRING(eventVariablesJson.productSearched))," ","") as searchword,
+            -- screenName,
+            -- screenType,
+            COUNT(DISTINCT CASE WHEN screenName IN ('ProductSearchResults','NestedSearchResults') THEN CONCAT(e.userid,e.sessionId,e.global_entity_id) END) as search_clicks,
+            COUNT(DISTINCT CASE WHEN screenName IN ('SectionDetails') THEN CONCAT(e.userid,e.sessionId,e.global_entity_id) END) as category_clicks,
+            COUNT(DISTINCT CONCAT(e.userid,e.sessionId,e.global_entity_id)) as clicks
+          FROM `peya-data-origins-pro.cl_sessions.perseus_events` e
+
+          INNER JOIN 
+            (SELECT partner_id FROM `peya-bi-tools-pro.il_core.dim_partner` WHERE is_darkstore) as dp
+            ON safe_cast(dp.partner_id as int64) = safe_cast(e.shopId as int64)
+          
+          WHERE partition_date BETWEEN '2025-12-01' AND '2025-12-26'
+                  AND eventAction in ('add_cart.clicked', "product.clicked")
+                  AND  DATE(e.payload_timestamp_local) >= '2025-12-01'
+                  -- AND shopid = '303592'   
+                  -- AND productSku = '118626403'
+                  AND
+                    screenName IN ('ProductSearchResults','NestedSearchResults','SectionDetails')
+            GROUP BY
+              1,2,3
