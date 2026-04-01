@@ -1,1 +1,44 @@
-https://docs.google.com/spreadsheets/d/1jT72R2wT3OFZINSPyw30wtswNizwtu5OgG-GFRj5PaQ/edit?gid=696872246#gid=696872246
+-- SELECT * FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_raw` LIMIT 1000;
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`
+-- PARTITION BY snapshot_date
+-- AS 
+INSERT INTO
+  `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`
+SELECT
+  LAST_DAY(CURRENT_DATE(), MONTH) AS snapshot_date,
+  contract_id,
+  timestamp,
+  email_address,
+  c.country_name,
+  -- Transformamos el string 'Lay's, Pringles' en ['Lay's', 'Pringles']
+  ARRAY(
+    SELECT
+      TRIM(brand)
+    FROM
+      UNNEST (SPLIT(brands, ',')) AS brand
+    WHERE
+      TRIM(brand) != ''
+  ) AS brands_array,
+  date_from,
+  date_to,
+  pct_sell_in,
+  roas_garantia,
+  type,
+  SPLIT(supplier," -- ")[0] as supplier,
+  cpg,
+  razon_social,
+  validation_ok,
+  account_name,
+  wallet,
+  COALESCE(i.implementador, "juliana.derose@pedidosya.com") AS implementador
+FROM
+  `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_raw` c
+  LEFT JOIN `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_account_implementador` i ON c.country_name = i.country_name
+  AND COALESCE(c.cpg, c.supplier) = i.name
+WHERE
+  timestamp IS NOT NULL
+  AND contract_id IS NOT NULL
+  AND account_name IS NOT NULL
+  AND wallet IS NOT NULL
+  AND validation_ok

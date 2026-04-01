@@ -1,0 +1,78 @@
+WITH users AS (
+  Select distinct global_entity_id, date, campaign_id, sum(reach) as reach
+from
+ `fulfillment-dwh-production.curated_data_shared_adtech.display_ads_campaigns_daily` 
+
+group by all
+)
+
+
+SELECT
+  date,
+  ads.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  CASE
+    WHEN advertiser_type = 'chain' THEN chain_name
+    ELSE vendor_name
+  END as advertiser_name,
+  CASE
+    WHEN advertiser_type = 'chain' THEN chain_id
+    ELSE vendor_id
+  END as advertiser_id,
+  advertiser_type,
+  campaign_id,
+  campaign_name,
+  NULL as cpg,
+  DATE(started_at) as started_at,
+  DATE(ended_at) as ended_at,
+  'acc' as implemented_at,
+  CASE
+    WHEN placement_screen IN ('shop_list') THEN 'Consideration'
+    WHEN placement_screen IN ('presearch','order_confirmation','home_presearch','home') THEN 'Awareness'
+    ELSE 'Otros'
+  END as funnel,
+  CASE placement_screen
+    WHEN 'shop_list' THEN 'Food Banner'
+    WHEN 'presearch' THEN 'Presearch'
+    WHEN 'order_confirmation' THEN 'Banner Order Status'
+    WHEN 'home_presearch' THEN 'Presearch'
+    WHEN 'home' THEN 'Home Banner'
+    ELSE 'Otros'
+  END as tool_name,
+  product as tool_type,
+  CASE
+    WHEN campaign_name LIKE 'MS_%'THEN 1
+    WHEN  campaign_name LIKE 'PS_%'THEN 1
+    ELSE 0
+  END as is_partnership,
+  cost_model,
+  price as price_theo,
+  MAX(total_budget_local) as total_budget_local,
+  SUM(budget_spent_local) as ad_spend_local,
+  SUM(loaded_impressions_count) as loaded_impressions,
+  SUM(viewable_impressions_count) as viewable_impressions,
+  SUM(clicks_count) as clicks,
+  SUM(orders_count) as orders,
+  SUM(gmv_local) as gmv_local,
+  0 as units,
+  SUM(users.reach) as reach,
+  0 as sends,
+  0 as opens
+FROM
+  `fulfillment-dwh-production.curated_data_shared_adtech.display_ads_creatives_daily` ads
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.global_entity_id = ads.global_entity_id
+LEFT JOIN
+  users
+USING(date,campaign_id)
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  SAFE_CAST(dp.partner_id AS STRING) = ads.vendor_id
+WHERE
+  placement_screen IS NOT NULL
+GROUP BY
+  ALL

@@ -1,0 +1,174 @@
+DECLARE date_from DATE DEFAULT CURRENT_DATE() -2;
+DECLARE date_to DATE DEFAULT CURRENT_DATE() -1; 
+
+
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_product_popularity_v2` 
+
+-- PARTITION BY date
+
+-- CLUSTER BY partner_id, barcode, level_one, level_two
+
+-- AS
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_product_popularity_v2` 
+
+ WITH
+
+base_v2 AS (
+    SELECT
+      vp.platform_vendor_id AS partner_id, --STRING
+      vp.platform_product_id as product_id, --STRING
+      global_entity_id,
+      product_name,
+      sku,
+      pim_product_id as master_code,
+      CASE
+        WHEN INSTR(b.barcode, ',') > 0 THEN REGEXP_REPLACE(SUBSTR(b.barcode, 1, INSTR(b.barcode, ',')-1), r'^0+', '')
+      ELSE
+        REGEXP_REPLACE(b.barcode, r'^0+', '')
+      END AS barcode,
+      mc.master_category_names.level_one,
+      mc.master_category_names.level_two,
+      mc.master_category_names.level_three
+
+    FROM `peya-data-origins-pro.cl_dmarts.qc_catalog_products` AS qc
+    LEFT JOIN UNNEST(barcodes) AS b
+    ,UNNEST(vendor_products) AS vp
+    ,UNNEST(master_categories) mc
+    QUALIFY ROW_NUMBER() OVER latest_chain = 1
+    WINDOW latest_chain AS (
+    PARTITION BY qc.global_entity_id, vp.platform_product_id, vp.warehouse_id, vp.platform_vendor_id
+    ORDER BY qc.chain_product_created_at_utc DESC NULLS LAST)
+),
+
+
+all_orders_v2 AS (
+  SELECT
+    fo.order_created_date_lt as order_date,
+    fo.platform_vendor_id as partner_id -- STRING
+    , fo.order_id as order_id
+    , i.platform_product_id as product_id -- STRING
+    , b.product_name
+    , b.barcode
+    , b.level_one
+    , b.level_two
+    , i.quantity_sold
+    , i.value_lc.total_amt_paid_lc GPV_LC
+    , i.value_euro.total_amt_paid_eur GPV_EU
+
+  FROM `peya-data-origins-pro.cl_dmarts.qc_orders` fo
+  LEFT JOIN UNNEST(items) as i
+ 
+  LEFT JOIN
+    --base b
+    base_v2 b
+  ON b.partner_id = fo.platform_vendor_id AND b.product_id = i.platform_product_id
+  WHERE 
+    DATE(order_created_date_lt) BETWEEN date_from AND date_to
+    AND is_successful
+),
+
+orders_v2 AS (
+  SELECT
+    o.order_date date
+  , partner_id
+  , product_id
+  , level_one
+  , level_two
+
+
+  , COALESCE(COUNT(DISTINCT order_id),0) as confirmed_orders
+  
+  , COALESCE(ROUND(SUM(GPV_LC),0),0) as GPV_LC
+  , COALESCE(ROUND(SUM(GPV_EU),0),0) as GPV_EU
+  , COALESCE(SUM(quantity_sold),0) as units_sold
+
+FROM
+  all_orders_v2 o
+
+GROUP BY ALL
+),
+
+
+events_info AS (
+  SELECT
+    DATE(e.payload_timestamp_local) AS date,
+    --e.partition_date,
+    e.topEventVariables.shopId AS partner_id,
+    CASE
+            -- WHEN STRING(e.eventVariablesJson.productSku) IS NOT NULL THEN STRING(e.eventVariablesJson.productSku)
+            -- ELSE STRING(e.eventVariablesJson.productSKU)
+            WHEN topEventVariables.productSku IS NOT NULL THEN topEventVariables.productSku
+            ELSE topEventVariables.productSku
+          END AS product_id,
+
+    COUNT(DISTINCT IF(e.eventAction = 'product.clicked', CONCAT(e.sessionId, e.global_entity_id), NULL)) AS product_clicked,
+    COUNT(DISTINCT IF(e.eventAction = 'add_cart.clicked', CONCAT(e.sessionId, e.global_entity_id), NULL)) AS add_cart,
+
+    COUNT(DISTINCT CONCAT(e.sessionId, e.global_entity_id)) AS any_click,
+    COUNT(DISTINCT IF(COALESCE(e.screenName, '-') IN ('ProductSearchResults','NestedSearchResults'),
+                      CONCAT(e.sessionId, e.global_entity_id), NULL)) AS any_click_search,
+    COUNT(DISTINCT IF(COALESCE(e.screenName, '-') IN ('SectionDetails'),
+                      CONCAT(e.sessionId, e.global_entity_id), NULL)) AS any_click_category,
+    COUNT(DISTINCT IF(COALESCE(e.screenName, '-') NOT IN ('SectionDetails','ProductSearchResults','NestedSearchResults'),
+                      CONCAT(e.sessionId, e.global_entity_id), NULL)) AS any_click_others
+  FROM `peya-data-origins-pro.cl_sessions.perseus_events` e
+  WHERE e.partition_date >= date_from
+    AND DATE(e.payload_timestamp_local) BETWEEN date_from AND date_to
+    AND e.eventAction IN ('add_cart.clicked', 'product.clicked')
+    AND e.topEventVariables.shopId IS NOT NULL 
+      AND
+         (CASE
+            -- WHEN STRING(e.eventVariablesJson.productSku) IS NOT NULL THEN STRING(e.eventVariablesJson.productSku)
+            -- ELSE STRING(e.eventVariablesJson.productSKU)
+            WHEN topEventVariables.productSku IS NOT NULL THEN topEventVariables.productSku
+            ELSE topEventVariables.productSku
+          END) IS NOT NULL
+  GROUP BY 1,2,3--,4
+),
+
+keys AS (
+  SELECT date, partner_id, product_id
+  FROM events_info
+  UNION DISTINCT
+  SELECT date, partner_id, product_id
+  FROM orders_v2
+)--,
+
+
+SELECT
+  k.date,
+  b.*,
+
+  COALESCE(o_v2.confirmed_orders, 0) AS confirmed_orders,
+  COALESCE(o_v2.GPV_LC, 0)           AS GPV_LC,
+  COALESCE(o_v2.GPV_EU, 0)           AS GPV_EU,
+  COALESCE(o_v2.units_sold, 0)       AS units_sold,
+
+  COALESCE(e.product_clicked, 0)     AS product_clicked,
+  COALESCE(e.add_cart, 0)            AS add_cart,
+  COALESCE(e.any_click, 0)           AS any_click,
+  COALESCE(e.any_click_search, 0)    AS any_click_search,
+  COALESCE(e.any_click_category, 0)  AS any_click_category,
+  COALESCE(e.any_click_others, 0)    AS any_click_others
+
+FROM keys k
+LEFT JOIN events_info e
+  ON e.date = k.date
+ AND e.partner_id = k.partner_id
+ AND e.product_id = k.product_id
+LEFT JOIN orders_v2 o_v2
+  ON o_v2.date = k.date
+ AND o_v2.partner_id = k.partner_id
+ AND o_v2.product_id = k.product_id
+LEFT JOIN base_v2 b
+  ON b.partner_id = k.partner_id
+ AND b.product_id = k.product_id
+
+WHERE
+  (COALESCE(e.any_click, 0) > 0 OR COALESCE(o_v2.confirmed_orders, 0) > 0)
+  AND b.product_id IS NOT NULL
+
+  --filtros de debug:
+  --AND b.product_id = '152331582'
+  --AND b.partner_id = '510506'

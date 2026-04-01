@@ -1,0 +1,303 @@
+DECLARE date_from DATE DEFAULT DATE_TRUNC(CURRENT_DATE(),MONTH);
+DECLARE date_to DATE DEFAULT LAST_DAY(CURRENT_DATE(),MONTH);
+
+
+CREATE OR REPLACE TABLE `peya-food-and-groceries.user_joaquin_guerra.temp_cobertura_pricing_unilever`
+
+PARTITION BY
+  yyyymmdd
+
+CLUSTER BY
+  partner_id, tipo_tienda, province_name
+
+AS
+
+WITH 
+brand_cpg_exception_list AS (
+  SELECT
+    *
+  FROM
+    `peya-data-origins-pro.cl_qcommerce.cpg_brand_mapping_exceptional_list` el
+  QUALIFY ROW_NUMBER() OVER latest_update = 1
+    WINDOW latest_update AS (
+    PARTITION BY global_entity_id, product_cpg, product_brand
+    ORDER BY COALESCE(
+    SAFE.PARSE_DATE('%d/%m/%Y', is_updated_by_central),
+    SAFE.PARSE_DATE('%m/%d/%Y', is_updated_by_central)
+) DESC NULLS LAST)
+  ORDER BY
+    1,2,3
+),
+
+
+unilever_products AS (
+  SELECT
+  DISTINCT
+  dvp.master_code,
+  pim.product_name_es,
+  CASE
+    WHEN INSTR(dvp.barcodes,',') > 0 AND STARTS_WITH(dvp.barcodes, "0") = False THEN SUBSTR(dvp.barcodes,1,INSTR(dvp.barcodes,',')-1)
+    WHEN INSTR(dvp.barcodes,',') > 0 AND STARTS_WITH(dvp.barcodes, "0") THEN SUBSTR(dvp.barcodes,2,INSTR(dvp.barcodes,',')-2)
+    ELSE dvp.barcodes
+  END AS barcode,
+  COALESCE(sel.correct_product_cpg, el.correct_product_cpg, pim.brand_owner_name, 'Others') AS product_cpg,
+  COALESCE(INITCAP(dvp.brand_name), INITCAP(pim.brands_name), 'Others') AS product_brand,
+  dvp.master_category_names.level_one,
+  dvp.master_category_names.level_two,
+  dvp.master_category_names.level_three,
+  dvp.master_category_names.level_four,
+  -- dvp.product_is_active,
+  -- dvp.catalog_price_lc,
+  -- COALESCE(stock_end_of_day,0) > COALESCE(im.sales_buffer,0) + COALESCE(stock_reserved_quantity_day,0) as stock
+FROM
+  `peya-bi-tools-pro.il_qcommerce.dim_vendor_product` dvp
+LEFT JOIN
+  `peya-datamarts-pro.dm_dmarts.dmarts_inventory` im
+ON
+  im.warehouse_id = dvp.warehouse_id AND dvp.sku = im.sku_id AND  im.date_local = CURRENT_DATE()-1
+LEFT JOIN
+  `peya-data-origins-pro.cl_dmarts.pim_product` pim
+ON
+  pim.product_id = dvp.master_code
+LEFT JOIN brand_cpg_exception_list  AS el
+ON dvp.global_entity_id = el.global_entity_id
+AND COALESCE(pim.brand_owner_name, 'Others') = el.product_cpg
+AND COALESCE(INITCAP(dvp.brand_name), INITCAP(pim.brands_name), 'Others') = INITCAP(el.product_brand)
+LEFT JOIN `peya-data-origins-pro.cl_qcommerce.cpg_barcode_mapping_exceptional_list` AS sel
+ON dvp.global_entity_id = sel.global_entity_id
+AND COALESCE(el.correct_product_cpg, pim.brand_owner_name, 'Others') = sel.product_cpg
+AND COALESCE(INITCAP(dvp.brand_name), INITCAP(pim.brands_name), 'Others') = sel.product_brand
+AND (CASE
+  WHEN INSTR(dvp.barcodes,',') > 0 AND STARTS_WITH(dvp.barcodes, "0") = False THEN SUBSTR(dvp.barcodes,1,INSTR(dvp.barcodes,',')-1)
+  WHEN INSTR(dvp.barcodes,',') > 0 AND STARTS_WITH(dvp.barcodes, "0") THEN SUBSTR(dvp.barcodes,2,INSTR(dvp.barcodes,',')-2)
+  ELSE dvp.barcodes
+END) = sel.barcode
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  dp.partner_id = dvp.remote_vendor_id
+WHERE
+  UPPER(dvp.country_code) = 'AR'
+AND
+  dp.is_active
+AND
+  dp.is_online
+AND
+  status = 'ACTIVE'
+ AND
+   dp.businessCategory.namesalesforce NOT IN ('pets','hardware','frozen_food','home_and_gifts','flowers_and_plants','fishery','electronics','pets','pasta_shop','nuts_and_dried_fruits','stationery_and_books')
+AND
+  COALESCE(sel.correct_product_cpg, el.correct_product_cpg, pim.brand_owner_name, 'Others') = 'Unilever'
+AND
+  IF(dvp.is_dmart,COALESCE(stock_end_of_day,0) > COALESCE(im.sales_buffer,0) + COALESCE(stock_reserved_quantity_day,0),product_is_active)
+AND
+  dvp.master_category_names.level_two IN ('Personal Care / Beauty','Cleaning / Laundry','Cooking / Condiments / Baking / Herbs / Spices','Canned / Jarred / Instant Meals','Pasta / Rice / Grains','Confectionary','Disposables','Health','Baby','Breakfast / Spreads')
+),
+
+product_orders AS (
+  SELECT
+ --   report_period,
+    barcodes,
+    MAX(product_name) as prod_name,
+    COUNT(DISTINCT order_id) as orders,
+    SUM(quantity_delivered) as units,
+    ROW_NUMBER() OVER(ORDER BY SUM(quantity_delivered) DESC , COUNT(DISTINCT order_id) DESC, barcodes) as product_ranking
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.partnership_orders_dip`
+  WHERE
+    report_period BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH) AND CURRENT_DATE()
+  AND
+    product_cpg = 'Unilever'
+  AND
+    country_name = 'Argentina'
+  GROUP BY
+    ALL
+),
+
+partners as (
+  SELECT
+    dhp.yyyymmdd,
+    restaurant_id as partner_id,
+    restaurant_name,
+    CASE
+    WHEN is_darkstore THEN 'Dmart'
+    WHEN is_aaa THEN 'AAA'
+    ELSE 'Local Shops'
+  END as tipo_tienda,
+    dhp.business_category.name as business_category_name,
+    dhp.business_category.name_salesforce as salesforce_name,
+    dhp.province_name,
+    dhp.zone_name,
+    dhp.area_name,
+    dhp.city_name,
+    da.polygon,
+  FROM
+    `peya-bi-tools-pro.il_core.dim_historical_partners` dhp
+  LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_area` da
+  ON
+    da.area_id = dhp.area_id AND NOT da.is_deleted
+WHERE
+  dhp.yyyymmdd BETWEEN date_from AND date_to
+AND
+  UPPER(dhp.country_name) = 'ARGENTINA'
+AND
+  dhp.is_active
+AND
+  dhp.is_online
+AND
+   dhp.business_category.name_salesforce NOT IN ('pets','hardware','frozen_food','home_and_gifts','flowers_and_plants','fishery','electronics','pets','pasta_shop','nuts_and_dried_fruits','stationery_and_books')
+
+),
+
+promos AS (
+  SELECT
+  day,
+  c.partner_id,
+  sku,
+  campaign_type,
+  CASE
+    WHEN campaign_type = 'SameItemBundle' THEN SAFE_DIVIDE(max_benefit_qty_limit,min_trigger_qty_product_discount)*percentage_discount 
+    ELSE percentage_discount
+  END as percentage_discount
+FROM
+  `peya-bi-tools-pro.il_qcommerce.promo_tool_campaigns_v2` c, UNNEST(GENERATE_DATE_ARRAY(DATE(start_timestamp),DATE(expire_timestamp))) day
+INNER JOIN
+  partners 
+ON
+  partners.yyyymmdd = day AND partners.partner_id = c.partner_id
+WHERE
+  create_date >= date_from - 15
+AND
+  day BETWEEN date_from AND date_to
+AND
+  percentage_discount BETWEEN 0 AND 1
+
+),
+
+precios_cat AS (
+  SELECT
+    dvps.snapshot_date,
+    dvps.remote_vendor_id as partner_id,
+    dvps.master_category_names.level_one,
+    dvps.master_category_names.level_two,
+    dvps.master_category_names.level_three,
+    dvps.master_category_names.level_four,
+    APPROX_QUANTILES(dvps.catalog_price_lc*(1-COALESCE(promos.percentage_discount,0)), 2)[OFFSET(1)] AS median_price,
+    AVG(dvps.catalog_price_lc*(1-COALESCE(promos.percentage_discount,0))) as avg_price,
+    SAFE_DIVIDE(COUNT(DISTINCT CASE WHEN promos.partner_id IS NOT NULL THEN dvps.sku END),COUNT(DISTINCT dvps.sku)) as promos_cat
+  FROM
+    `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` dvps
+  LEFT JOIN
+    `peya-datamarts-pro.dm_dmarts.dmarts_inventory` im
+  ON
+    im.warehouse_id = dvps.warehouse_id AND dvps.sku = im.sku_id AND dvps.snapshot_date = im.date_local
+  INNER JOIN
+    partners p
+  ON
+    p.partner_id = dvps.remote_vendor_id 
+  LEFT JOIN
+    promos
+  ON
+    promos.day = dvps.snapshot_date AND promos.partner_id = p.partner_id AND promos.sku = dvps.sku
+  LEFT JOIN
+    unilever_products up
+  ON
+    up.master_code = dvps.master_code
+  WHERE
+    dvps.snapshot_date BETWEEN date_from AND date_to
+  AND
+    dvps.status = 'ACTIVE'
+  AND
+    dvps.product_is_active
+  AND
+    IF(p.tipo_tienda = 'Dmart',COALESCE(stock_end_of_day,0) > COALESCE(im.sales_buffer,0) + COALESCE(stock_reserved_quantity_day,0),TRUE)
+  AND
+    up.master_code IS NULL
+  GROUP BY
+    ALL
+),
+
+partner_product AS (
+SELECT
+  p.*,
+  up.*,
+  po.orders,
+  po.units,
+  po.product_ranking
+FROM
+  partners p
+LEFT JOIN
+  unilever_products up
+LEFT JOIN
+  product_orders po
+ON
+  po.barcodes = up.barcode
+ON
+  1=1
+
+),
+
+base AS 
+(
+SELECT
+  pp.*,
+  dvps.catalog_price_lc,
+  dvps.catalog_price_lc*(1-COALESCE(promos.percentage_discount,0)) as promo_price,
+  CASE
+    WHEN dvps.master_code IS NOT NULL THEN 1
+    ELSE 0
+  END as is_listed,
+  CASE
+    WHEN tipo_tienda = 'Dmart' AND COALESCE(stock_end_of_day,0) > COALESCE(im.sales_buffer,0) + COALESCE(stock_reserved_quantity_day,0) THEN 1
+    WHEN tipo_tienda != 'Dmart' AND product_is_active THEN 1
+    ELSE 0 
+  END as is_active,
+  CASE
+    WHEN promos.sku IS NOT NULL THEN 1
+    ELSE 0
+  END as is_promo,
+  promos.campaign_type,
+  promos.percentage_discount,
+  pc.median_price,
+  pc.avg_price,
+  pc.promos_cat
+FROM
+  partner_product pp
+LEFT JOIN
+  (SELECT remote_vendor_id, snapshot_date, master_code, catalog_price_lc, product_is_active, warehouse_id, sku FROM `peya-bi-tools-pro.il_qcommerce.dim_vendor_product_snapshot` WHERE status = 'ACTIVE' AND snapshot_date BETWEEN date_from AND date_to) dvps 
+ON
+  pp.partner_id = dvps.remote_vendor_id AND pp.yyyymmdd = dvps.snapshot_date AND pp.master_code = dvps.master_code
+LEFT JOIN
+  `peya-datamarts-pro.dm_dmarts.dmarts_inventory` im
+ON
+  im.warehouse_id = dvps.warehouse_id AND dvps.sku = im.sku_id AND dvps.snapshot_date = im.date_local
+LEFT JOIN
+  precios_cat pc
+ON
+  pc.snapshot_date = pp.yyyymmdd AND pc.partner_id = pp.partner_id AND CONCAT(COALESCE(pc.level_one,"-"),COALESCE(pc.level_two,"-"),COALESCE(pc.level_three,"-"),COALESCE(pc.level_four,"-")) = CONCAT(COALESCE(pp.level_one,"-"),COALESCE(pp.level_two,"-"),COALESCE(pp.level_three,"-"),COALESCE(pp.level_four,"-"))
+LEFT JOIN
+  promos
+ON
+  promos.sku = dvps.sku AND promos.day = pp.yyyymmdd AND promos.partner_id = pp.partner_id
+--WHERE
+  --dvps.snapshot_date BETWEEN date_from AND date_to
+-- AND
+--   dvps.status = 'ACTIVE'
+)
+
+SELECT
+  -- yyyymmdd,
+  -- partner_id,
+  -- COUNT(DISTINCT master_code) as total_products,
+  -- SUM(is_listed) as total_listados,
+  -- SUM(is_active) as total_activos
+  *
+FROM
+  base
+-- WHERE
+--   partner_id = 178322
+-- AND
+--   is_active = 1
+-- GROUP BY
+--   1,2

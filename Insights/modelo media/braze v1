@@ -1,0 +1,181 @@
+WITH email as
+(
+SELECT
+  week as date,
+  dc.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  NULL as advertiser_name,
+  NULL as advertiser_id,
+  NULL as advertiser_type,
+  group_id as campaign_id,
+  group_name as campaign_name,
+  NULL as cpg,
+  NULL as started_at,
+  NULL as ended_at,
+  'braze' as implemented_at,
+  'Awareness' as funnel,
+  'Email' as tool_name,
+  'off_app' as tool_type,
+  CASE
+    WHEN ms.group_id IS NOT NULL THEN 1
+    WHEN REGEXP_CONTAINS(lower(b.group_name),r'partnership|partnerships') THEN 1
+    ELSE 0
+  END as is_partnership,
+  'fixed' as cost_model,
+  0 as price_theo,
+  0 as total_budget_local,
+  0 as ad_spend_local,
+  0 as loaded_impressions,
+  0 as viewable_imppressions,
+  SUM(email_click) as clicks,
+  0 as orders,
+  0 as gmv_local,
+  0 as units,
+  0 as reach,
+  SUM(email_send) as sends,
+  SUM(email_open) as opens
+FROM
+  `peya-datamarts-pro.dm_growth.consolidated_comms_week` b
+LEFT JOIN
+  (SELECT DISTINCT group_id FROM `peya-datamarts-pro.dm_growth.consolidated_comms_week` WHERE (split_name LIKE 'MS%' OR (canvas_step_name LIKE '%MS%')) AND canvas_step_name NOT LIKE '%MSE%') ms
+USING(group_id)
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.country_id = b.country_id
+WHERE
+  email_flag
+GROUP BY
+  ALL
+),
+
+inapp AS (
+
+SELECT
+  week as date,
+  dc.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  NULL as advertiser_name,
+  NULL as advertiser_id,
+  NULL as advertiser_type,
+  group_id as campaign_id,
+  group_name as campaign_name,
+  NULL as cpg,
+  NULL as started_at,
+  NULL as ended_at,
+  'braze' as implemented_at,
+  'Awareness' as funnel,
+  'IAM' as tool_name,
+  'off_app' as tool_type,
+  CASE
+    WHEN ms.group_id IS NOT NULL THEN 1
+    WHEN REGEXP_CONTAINS(lower(b.group_name),r'partnership|partnerships') THEN 1
+    ELSE 0
+  END as is_partnership,
+  'fixed' as cost_model,
+  0 as price_theo,
+  0 as total_budget_local,
+  0 as ad_spend_local,
+  SUM(inapp_message_impression) as loaded_impressions,
+  0 as viewable_imppressions,
+  SUM(inapp_message_click) as clicks,
+  0 as orders,
+  0 as gmv_local,
+  0 as units,
+  0 as reach,
+  0 as sends,
+  0 as opens
+FROM
+  `peya-datamarts-pro.dm_growth.consolidated_comms_week` b
+LEFT JOIN
+  (SELECT DISTINCT group_id FROM `peya-datamarts-pro.dm_growth.consolidated_comms_week` WHERE (split_name LIKE 'MS%' OR (canvas_step_name LIKE '%MS%')) AND canvas_step_name NOT LIKE '%MSE%') ms
+USING(group_id)
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.country_id = b.country_id
+WHERE
+  inapp_flag
+GROUP BY
+  ALL
+),
+
+push AS (
+
+SELECT
+  week as date,
+  dc.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  NULL as advertiser_name,
+  NULL as advertiser_id,
+  NULL as advertiser_type,
+  group_id as campaign_id,
+  group_name as campaign_name,
+  NULL as cpg,
+  NULL as started_at,
+  NULL as ended_at,
+  'braze' as implemented_at,
+  'Awareness' as funnel,
+  'Push' as tool_name,
+  'off_app' as tool_type,
+  CASE
+    WHEN ms.group_id IS NOT NULL THEN 1
+    WHEN REGEXP_CONTAINS(lower(b.group_name),r'partnership|partnerships') THEN 1
+    ELSE 0
+  END as is_partnership,
+  'fixed' as cost_model,
+  0 as price_theo,
+  0 as total_budget_local,
+  0 as ad_spend_local,
+  0 as loaded_impressions,
+  0 as viewable_imppressions,
+  0 as clicks,
+  0 as orders,
+  0 as gmv_local,
+  0 as units,
+  0 as reach,
+  SUM(push_notify_send) as sends,
+  SUM(push_notify_open) as opens
+FROM
+  `peya-datamarts-pro.dm_growth.consolidated_comms_week` b
+LEFT JOIN
+  (SELECT DISTINCT group_id FROM `peya-datamarts-pro.dm_growth.consolidated_comms_week` WHERE (split_name LIKE 'MS%' OR (canvas_step_name LIKE '%MS%')) AND canvas_step_name NOT LIKE '%MSE%') ms
+USING(group_id)
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.country_id = b.country_id
+WHERE
+  push_flag
+GROUP BY
+  ALL
+)
+
+
+
+SELECT
+  *
+FROM
+  email
+-- WHERE
+--   campaign_name = 'DMA_MA_250221_AR_PY_DMO_COMMS-ORG-Danone-Ser-Mail-DMART_PARTNERSHIP_CAN'
+
+UNION ALL
+
+SELECT
+  *
+FROM
+  inapp
+
+UNION ALL
+
+SELECT
+  *
+FROM
+  push
+-- WHERE
+--   campaign_name = 'EAT_AUT_250207_AR_PY_RET_COMMS-ORG-Knorr-LUNCH _PROMO_CAN_CRM'
+

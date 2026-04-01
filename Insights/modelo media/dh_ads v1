@@ -1,0 +1,73 @@
+SELECT
+  date,
+  ads.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  account_name as advertiser_name,
+  account_id as advertiser_id,
+  account_type as advertiser_type,
+  campaign_id,
+  campaign_name,
+  NULL as cpg,
+  DATE(campaign_start_date) as started_at,
+  DATE(campaign_end_date) as ended_at,
+  'dh_ads' as implemented_at,
+  CASE
+    WHEN (REGEXP_CONTAINS(lower(campaign_name),'upselling') OR campaign_type = 'AD_FORMAT_PRODUCT_AD') THEN 'Conversion'
+    ELSE 'Consideration'
+  END as funnel,
+  CASE 
+    WHEN REGEXP_CONTAINS(lower(campaign_name),'upselling') THEN 'Upselling'
+    WHEN asset_type = 'AD_TYPE_SEARCH' AND placement = 'SCREEN_VENDOR_HOME' THEN 'Keyword Search'
+    WHEN asset_type = 'AD_TYPE_LISTING' AND placement = 'SCREEN_SUB_CATEGORY' THEN 'Sponsored Products'
+    WHEN asset_type = 'AD_TYPE_BANNER_SHOPPABLE' THEN 'Shoppable Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_NO_ACTION' AND placement = 'SCREEN_VENDOR_HOME' THEN 'Vendor Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_VENDOR_HOME' THEN 'Vendor Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_CATEGORY' THEN 'Category Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_VERTICAL_HOME_PRESEARCH' THEN 'QC Presearch'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_VERTICAL_HOME' THEN 'Vertical Banner'
+    ELSE 'Otros'
+  END as tool_name,
+  CASE campaign_type
+    WHEN 'AD_FORMAT_PRODUCT_AD' THEN 'product_ads'
+    WHEN 'AD_FORMAT_DISPLAY_AD' THEN 'display_ads'
+  END as tool_type,
+  CASE
+    WHEN campaign_name LIKE 'MS_%'THEN 1
+    WHEN  campaign_name LIKE 'PS_%'THEN 1
+    ELSE 0
+  END as is_partnership,
+  CASE campaign_type
+    WHEN 'AD_FORMAT_PRODUCT_AD' THEN 'cpc'
+    WHEN 'AD_FORMAT_DISPLAY_AD' THEN 'cpm'
+  END as cost_model,
+  0 as price_theo,
+  MAX(campaign_budget) as total_budget_local,
+  SUM(ad_spend) as ad_spend_local,
+  SUM(impressions) as loaded_impressions,
+  0 AS viewable_impressions,
+  SUM(total_clicks) as clicks,
+  SUM(campaign_orders) as orders,
+  SUM(sales_revenue) as gmv_local,
+  SUM(unit_sold) as units,
+  0 as reach,
+  0 as sends,
+  0 as opens
+FROM
+  `peya-data-origins-pro.cl_adtech.qcadtech_agg_dmp_v2` ads
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.global_entity_id = ads.global_entity_id
+WHERE
+  date >= '2025-09-01'
+-- AND
+--   placement = 'SCREEN_VERTICAL_HOME_PRESEARCH'
+-- -- AND
+-- --   asset_type = 'SCREEN_CATEGORY'
+-- AND
+--   campaign_id = '691f1f5f586261a2623da526'
+-- AND
+--   product_orders = campaign_orders
+GROUP BY
+  ALL

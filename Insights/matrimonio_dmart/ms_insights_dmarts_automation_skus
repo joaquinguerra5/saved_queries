@@ -1,19 +1,9 @@
-DECLARE month_from DATE DEFAULT DATE_TRUNC(CURRENT_DATE(),MONTH);
-DECLARE month_to DATE DEFAULT LAST_DAY(CURRENT_DATE(),MONTH);
+DECLARE month_from DATE DEFAULT DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH), MONTH);
+DECLARE month_to DATE DEFAULT LAST_DAY(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH), MONTH);
 DECLARE ROAS_TH FLOAT64 DEFAULT 2.5;
 --DECLARE CAT_CUM_TH FLOAT64 DEFAULT 0.80;
 DECLARE PROD_CUM_TH FLOAT64 DEFAULT 0.80;
 
--- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_automation_skus`
-
--- PARTITION BY month
-
--- CLUSTER BY
---   country_name, contract_id
-
--- AS
-
--- WITH 
 
 INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_dmarts_automation_skus`
 
@@ -26,7 +16,9 @@ contracts_cpg AS (
     `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
   LEFT JOIN UNNEST(brands_array) brands
   WHERE
-    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+    date_from <= month_to
+  AND
+    date_to >= month_from
   AND
     type = 'CPG'
   AND
@@ -43,7 +35,9 @@ contracts_supplier AS (
     `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
   LEFT JOIN UNNEST(brands_array) brands
   WHERE
-    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+    date_from <= month_to
+  AND
+    date_to >= month_from
   AND
     type = 'Proveedor'
   AND
@@ -59,7 +53,9 @@ contracts_cpg_all AS (
     `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
   LEFT JOIN UNNEST(brands_array) brands
   WHERE
-    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+    date_from <= month_to
+  AND
+    date_to >= month_from
   AND
     type = 'CPG'
   AND
@@ -76,7 +72,10 @@ contracts_supplier_all AS (
     `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated` c
   LEFT JOIN UNNEST(brands_array) brands
   WHERE
-    RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+    --RANGE_CONTAINS(RANGE(date_from,date_to), RANGE(month_from,month_to))
+    date_from <= month_to
+  AND
+    date_to >= month_from
   AND
     type = 'Proveedor'
   AND
@@ -84,7 +83,6 @@ contracts_supplier_all AS (
   AND
     c.snapshot_date = (SELECT MAX(snapshot_date) FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_dmart_contracts_curated`)
 ),
-
 
 
 
@@ -190,6 +188,7 @@ base_prods AS (
     AND p.master_code IS NOT NULL
 ),
 
+
 -- 2) Productos dentro de esas categorías, ordenados priorizando clicks
 prod AS (
   SELECT
@@ -253,7 +252,7 @@ supplier_skus AS
     chain_id,
     COALESCE(c.contract_id,ca.contract_id) as contract_id,
     --supplier_id,
-    supplier_name as cpg_supplier_name,
+    supplier_name as cpg_supplier_name, 
     --supplier_finance_id,
     pk.brand_name,
     pk.product_name,
@@ -278,13 +277,20 @@ LEFT JOIN
   ON
     ca.supplier = dpo.supplier_name AND lower(ca.country_name) = lower(dpo.country_name)
 WHERE
-  po_creation_date BETWEEN DATE_TRUNC(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH) AND LAST_DAY(DATE_SUB(CURRENT_DATE(),INTERVAL 1 MONTH),MONTH)
+  po_creation_date BETWEEN month_from AND month_to
 AND
   pk.brand_name IS NOT NULL
 AND
   (c.type IS NOT NULL OR ca.type IS NOT NULL)
+AND
+  (
+  COALESCE(c.roas_garantia, ca.roas_garantia) != 'Sí'
+  OR COALESCE(pk.roas_prod,0) >= ROAS_TH
+)
 GROUP BY
   ALL),
+
+
 
 cpg_skus AS (
   SELECT
@@ -319,6 +325,11 @@ cpg_skus AS (
     brand_name IS NOT NULL
   AND
     (c.type IS NOT NULL OR ca.type IS NOT NULL)
+  AND
+  (
+  COALESCE(c.roas_garantia, ca.roas_garantia) != 'Sí'
+  OR COALESCE(pk.roas_prod,0) >= ROAS_TH
+  )
   
 )
 

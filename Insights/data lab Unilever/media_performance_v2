@@ -1,0 +1,454 @@
+-- ============================================================================
+-- MEDIA PERFORMANCE v6
+-- ============================================================================
+-- T1: ms_insights_agg_campaign_performance     → Display Ads + ad_spend campaña
+-- T2: ms_insights_product_ads_performance      → Product Ads (nivel producto)
+--
+-- Lógica:
+--   A) Display puro: campaña solo en T1, sin ninguna línea en T2 → todo de T1.
+--
+--   B) Product Ads con spend propio: T2 tiene ad_spend > 0
+--      → métricas completas de T2 + budget de T1.
+--
+--   C) Product Ads sin spend (precio fijo, ej: Upselling):
+--      C.1) Líneas de producto de T2 (sin ad_spend).
+--      C.2) Línea de campaña de T1 con ad_spend solamente.
+--
+--   D) Campañas "híbridas": T1 tiene impressions/clicks/ad_spend a nivel
+--      campaña, y T2 solo tiene revenue/orders/gmv por producto.
+--      D.1) Línea de campaña de T1 con impressions, clicks, ad_spend
+--           (sin revenue/gmv para no duplicar).
+--      D.2) Líneas de producto de T2 solo con revenue/gmv/orders
+--           (sin impressions/clicks/ad_spend).
+-- ============================================================================
+
+DECLARE date_filter DATE DEFAULT DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH);
+-- DECLARE date_filter DATE DEFAULT '2025-07-01';
+
+ CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_datalab_media_performance_ar` 
+ 
+ PARTITION BY day
+
+ CLUSTER BY 
+
+ is_partnership, funnel, tool_name
+ 
+ AS
+
+
+
+
+WITH target_roas_map AS (
+  SELECT brand, target FROM UNNEST([
+    STRUCT('dove'       AS brand, 3.0  AS target),
+    STRUCT('tresemmé',           2.9),
+    STRUCT('sedal',              2.9),
+    STRUCT('rexona',             3.6),
+    STRUCT('axe',                4.2),
+    STRUCT('lux',                5.5),
+    STRUCT('skip',               4.2),
+    STRUCT('comfort',            3.4),
+    STRUCT('ala',                5.5),
+    STRUCT('cif',                4.8),
+    STRUCT("hellmann's",         5.7),
+    STRUCT('savora',             5.1),
+    STRUCT('knorr',              4.2)
+  ])
+),
+
+
+-- ============================================================================
+-- Clasificar campañas en T2 según qué métricas tienen a nivel producto
+-- ============================================================================
+
+-- Campañas sin ad_spend propio en T2 (precio fijo)
+campaigns_without_product_spend AS (
+  SELECT
+    campaign_id,
+    tool_name,
+    date
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_product_ads_performance`
+  WHERE date >= date_filter
+    AND country_name = 'Argentina'
+  GROUP BY campaign_id, tool_name, date
+  HAVING SUM(COALESCE(ad_spend_local, 0)) = 0
+),
+
+-- Campañas "híbridas": en T2 tienen revenue/gmv pero NO tienen
+-- impressions ni clicks propios (esos vienen de T1)
+campaigns_hybrid AS (
+  SELECT
+    campaign_id,
+    tool_name,
+    date
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_product_ads_performance`
+  WHERE date >= date_filter
+    AND country_name = 'Argentina'
+  GROUP BY campaign_id, tool_name, date
+  HAVING SUM(COALESCE(ad_spend_local, 0)) = 0
+     AND SUM(COALESCE(loaded_impressions, 0)) = 0
+     AND SUM(COALESCE(clicks, 0)) = 0
+     AND SUM(COALESCE(gmv_local, 0)) > 0
+),
+
+
+-- ============================================================================
+-- BLOQUE A: DISPLAY ADS PURO (de T1)
+-- Campañas que NO tienen NINGUNA línea en T2.
+-- ============================================================================
+display_ads AS (
+  SELECT
+    t1.date                         AS day,
+    t1.is_partnership,
+    t1.tool_name,
+    t1.funnel,
+    t1.campaign_id,
+    t1.campaign_name,
+    t1.advertiser_name,
+    t1.cost_model,
+    CAST(NULL AS STRING)            AS product_name,
+    CAST(NULL AS STRING)            AS product_brand,
+    t1.cpg_inferred,
+    CAST(NULL AS STRING)            AS master_category_lvl_one,
+    CAST(NULL AS STRING)            AS master_category_lvl_two,
+    CAST(NULL AS STRING)            AS master_category_lvl_three,
+    CAST(NULL AS STRING)            AS master_category_lvl_four,
+    -- t1.total_budget_eur             AS budget_eur,
+    -- t1.total_budget_local           AS budget_lc,
+    -- DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1 AS days,
+    -- SAFE_DIVIDE(t1.total_budget_eur,   DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_eur,
+    -- SAFE_DIVIDE(t1.total_budget_local, DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_lc,
+    t1.ad_spend_eur,
+    t1.ad_spend_local               AS ad_spend_lc,
+    t1.orders,
+    t1.loaded_impressions           AS impressions,
+    t1.viewable_impressions         AS viewed_impressions,
+    t1.clicks,
+    t1.gmv_eur                      AS revenue_eur,
+    t1.gmv_local                    AS revenue_lc,
+    t1.sends,
+    t1.opens
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_agg_campaign_performance` AS t1
+  WHERE t1.date >= date_filter
+    AND t1.country_name = 'Argentina'
+    AND t1.tool_type = 'display_ads'
+    -- Sin ninguna línea en T2 para esta campaña (independiente de fecha)
+    AND NOT EXISTS (
+      SELECT 1
+      FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_product_ads_performance` AS t2
+      WHERE t2.campaign_id  = t1.campaign_id
+        AND t2.tool_name    = t1.tool_name
+        AND t2.country_name = 'Argentina'
+    )
+),
+
+
+-- ============================================================================
+-- BLOQUE B: PRODUCT ADS CON SPEND PROPIO (de T2)
+-- T2 tiene ad_spend > 0 Y tiene impressions/clicks propios.
+-- ============================================================================
+product_ads_with_spend AS (
+  SELECT
+    t2.date                         AS day,
+    t2.is_partnership,
+    t2.tool_name,
+    t2.funnel,
+    t2.campaign_id,
+    t2.campaign_name,
+    t2.advertiser_name,
+    t2.cost_model,
+    t2.product_name,
+    t2.product_brand,
+    t2.cpg_inferred,
+    t2.level_one                    AS master_category_lvl_one,
+    t2.level_two                    AS master_category_lvl_two,
+    t2.level_three                  AS master_category_lvl_three,
+    t2.level_four                   AS master_category_lvl_four,
+    -- t1.total_budget_eur             AS budget_eur,
+    -- t1.total_budget_local           AS budget_lc,
+    -- DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1 AS days,
+    -- SAFE_DIVIDE(t1.total_budget_eur,   DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_eur,
+    -- SAFE_DIVIDE(t1.total_budget_local, DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_lc,
+    SUM(t2.ad_spend_eur)            AS ad_spend_eur,
+    SUM(t2.ad_spend_local)          AS ad_spend_lc,
+    SUM(t2.orders)                  AS orders,
+    CAST(NULL AS INT64)             AS impressions,
+    SUM(t2.loaded_impressions)      AS viewed_impressions,
+    SUM(t2.clicks)                  AS clicks,
+    SUM(t2.gmv_eur)                 AS revenue_eur,
+    SUM(t2.gmv_local)               AS revenue_lc,
+    0                               AS sends,
+    0                               AS opens
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_product_ads_performance` AS t2
+  LEFT JOIN `peya-food-and-groceries.automated_tables_reports.ms_insights_agg_campaign_performance` AS t1
+    ON  t1.campaign_id  = t2.campaign_id
+    AND t1.tool_name    = t2.tool_name
+    AND t1.date         = t2.date
+  WHERE t2.date >= date_filter
+    AND t2.country_name = 'Argentina'
+    -- Tiene spend propio
+    AND NOT EXISTS (
+      SELECT 1 FROM campaigns_without_product_spend AS nps
+      WHERE nps.campaign_id = t2.campaign_id
+        AND nps.tool_name   = t2.tool_name
+        AND nps.date        = t2.date
+    )
+    -- No es híbrida (tiene sus propias impressions/clicks)
+    AND NOT EXISTS (
+      SELECT 1 FROM campaigns_hybrid AS h
+      WHERE h.campaign_id = t2.campaign_id
+        AND h.tool_name   = t2.tool_name
+        AND h.date        = t2.date
+    )
+  GROUP BY ALL
+),
+
+
+-- ============================================================================
+-- BLOQUE C: PRODUCT ADS SIN SPEND (precio fijo — ej: Upselling)
+-- Excluye las híbridas (que se manejan en Bloque D).
+-- ============================================================================
+
+-- C.1) Líneas de producto (sin ad_spend)
+product_ads_no_spend_products AS (
+  SELECT
+    t2.date                         AS day,
+    t2.is_partnership,
+    t2.tool_name,
+    t2.funnel,
+    t2.campaign_id,
+    t2.campaign_name,
+    t2.advertiser_name,
+    t2.cost_model,
+    t2.product_name,
+    t2.product_brand,
+    t2.cpg_inferred,
+    t2.level_one                    AS master_category_lvl_one,
+    t2.level_two                    AS master_category_lvl_two,
+    t2.level_three                  AS master_category_lvl_three,
+    t2.level_four                   AS master_category_lvl_four,
+    -- CAST(NULL AS FLOAT64)           AS budget_eur,
+    -- CAST(NULL AS FLOAT64)           AS budget_lc,
+    -- CAST(NULL AS INT64)             AS days,
+    -- CAST(NULL AS FLOAT64)           AS daily_budget_eur,
+    -- CAST(NULL AS FLOAT64)           AS daily_budget_lc,
+    0.0                             AS ad_spend_eur,
+    0.0                             AS ad_spend_lc,
+    0                               AS orders,
+    CAST(NULL AS INT64)             AS impressions,
+    SUM(t2.loaded_impressions)      AS viewed_impressions,
+    SUM(t2.clicks)                  AS clicks,
+    SUM(t2.gmv_eur)                 AS revenue_eur,
+    SUM(t2.gmv_local)               AS revenue_lc,
+    0                               AS sends,
+    0                               AS opens
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_product_ads_performance` AS t2
+  INNER JOIN campaigns_without_product_spend AS nps
+    ON  nps.campaign_id = t2.campaign_id
+    AND nps.tool_name   = t2.tool_name
+    AND nps.date        = t2.date
+  WHERE t2.date >= date_filter
+    AND t2.country_name = 'Argentina'
+    -- Excluir híbridas (se manejan en Bloque D)
+    AND NOT EXISTS (
+      SELECT 1 FROM campaigns_hybrid AS h
+      WHERE h.campaign_id = t2.campaign_id
+        AND h.tool_name   = t2.tool_name
+        AND h.date        = t2.date
+    )
+  GROUP BY ALL
+),
+
+-- C.2) Línea de campaña con ad_spend (sin métricas de producto)
+product_ads_no_spend_campaign AS (
+  SELECT
+    t1.date                         AS day,
+    t1.is_partnership,
+    t1.tool_name,
+    t1.funnel,
+    t1.campaign_id,
+    t1.campaign_name,
+    t1.advertiser_name,
+    t1.cost_model,
+    CAST(NULL AS STRING)            AS product_name,
+    CAST(NULL AS STRING)            AS product_brand,
+    t1.cpg_inferred,
+    CAST(NULL AS STRING)            AS master_category_lvl_one,
+    CAST(NULL AS STRING)            AS master_category_lvl_two,
+    CAST(NULL AS STRING)            AS master_category_lvl_three,
+    CAST(NULL AS STRING)            AS master_category_lvl_four,
+    -- t1.total_budget_eur             AS budget_eur,
+    -- t1.total_budget_local           AS budget_lc,
+    -- DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1 AS days,
+    -- SAFE_DIVIDE(t1.total_budget_eur,   DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_eur,
+    -- SAFE_DIVIDE(t1.total_budget_local, DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_lc,
+    t1.ad_spend_eur,
+    t1.ad_spend_local               AS ad_spend_lc,
+    t1.orders                       AS orders,
+    0                               AS impressions,
+    CAST(NULL AS INT64)             AS viewed_impressions,
+    0                               AS clicks,
+    0.0                             AS revenue_eur,
+    0.0                             AS revenue_lc,
+    0                               AS sends,
+    0                               AS opens
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_agg_campaign_performance` AS t1
+  INNER JOIN campaigns_without_product_spend AS nps
+    ON  nps.campaign_id = t1.campaign_id
+    AND nps.tool_name   = t1.tool_name
+    AND nps.date        = t1.date
+  WHERE t1.date >= date_filter
+    AND t1.country_name = 'Argentina'
+    -- Excluir híbridas (se manejan en Bloque D)
+    AND NOT EXISTS (
+      SELECT 1 FROM campaigns_hybrid AS h
+      WHERE h.campaign_id = t1.campaign_id
+        AND h.tool_name   = t1.tool_name
+        AND h.date        = t1.date
+    )
+),
+
+
+-- ============================================================================
+-- BLOQUE D: CAMPAÑAS HÍBRIDAS
+-- T1 tiene impressions, clicks, ad_spend a nivel campaña.
+-- T2 solo tiene revenue/gmv/orders a nivel producto.
+-- ============================================================================
+
+-- D.1) Línea de campaña de T1: impressions, clicks, ad_spend (sin revenue)
+hybrid_campaign_metrics AS (
+  SELECT
+    t1.date                         AS day,
+    t1.is_partnership,
+    t1.tool_name,
+    t1.funnel,
+    t1.campaign_id,
+    t1.campaign_name,
+    t1.advertiser_name,
+    t1.cost_model,
+    CAST(NULL AS STRING)            AS product_name,
+    CAST(NULL AS STRING)            AS product_brand,
+    t1.cpg_inferred,
+    CAST(NULL AS STRING)            AS master_category_lvl_one,
+    CAST(NULL AS STRING)            AS master_category_lvl_two,
+    CAST(NULL AS STRING)            AS master_category_lvl_three,
+    CAST(NULL AS STRING)            AS master_category_lvl_four,
+    -- t1.total_budget_eur             AS budget_eur,
+    -- t1.total_budget_local           AS budget_lc,
+    -- DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1 AS days,
+    -- SAFE_DIVIDE(t1.total_budget_eur,   DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_eur,
+    -- SAFE_DIVIDE(t1.total_budget_local, DATE_DIFF(t1.ended_at, t1.started_at, DAY) + 1) AS daily_budget_lc,
+    t1.ad_spend_eur,
+    t1.ad_spend_local               AS ad_spend_lc,
+    t1.orders                       AS orders,
+    t1.loaded_impressions           AS impressions,
+    t1.viewable_impressions         AS viewed_impressions,
+    t1.clicks,
+    0.0                             AS revenue_eur,
+    0.0                             AS revenue_lc,
+    t1.sends                        AS sends,
+    t1.opens                        AS opens
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_agg_campaign_performance` AS t1
+  INNER JOIN campaigns_hybrid AS h
+    ON  h.campaign_id = t1.campaign_id
+    AND h.tool_name   = t1.tool_name
+    AND h.date        = t1.date
+  WHERE t1.date >= date_filter
+    AND t1.country_name = 'Argentina'
+),
+
+-- D.2) Líneas de producto de T2: solo revenue/gmv (sin impressions/clicks/ad_spend)
+hybrid_product_revenue AS (
+  SELECT
+    t2.date                         AS day,
+    t2.is_partnership,
+    t2.tool_name,
+    t2.funnel,
+    t2.campaign_id,
+    t2.campaign_name,
+    t2.advertiser_name,
+    t2.cost_model,
+    t2.product_name,
+    t2.product_brand,
+    t2.cpg_inferred,
+    t2.level_one                    AS master_category_lvl_one,
+    t2.level_two                    AS master_category_lvl_two,
+    t2.level_three                  AS master_category_lvl_three,
+    t2.level_four                   AS master_category_lvl_four,
+    -- CAST(NULL AS FLOAT64)           AS budget_eur,
+    -- CAST(NULL AS FLOAT64)           AS budget_lc,
+    -- CAST(NULL AS INT64)             AS days,
+    -- CAST(NULL AS FLOAT64)           AS daily_budget_eur,
+    -- CAST(NULL AS FLOAT64)           AS daily_budget_lc,
+    0.0                             AS ad_spend_eur,
+    0.0                             AS ad_spend_lc,
+    0                               AS orders,
+    0                               AS impressions,
+    0                               AS viewed_impressions,
+    0                               AS clicks,
+    SUM(t2.gmv_eur)                 AS revenue_eur,
+    SUM(t2.gmv_local)               AS revenue_lc,
+    0                               AS sends,
+    0                               AS opens
+  FROM `peya-food-and-groceries.automated_tables_reports.ms_insights_product_ads_performance` AS t2
+  INNER JOIN campaigns_hybrid AS h
+    ON  h.campaign_id = t2.campaign_id
+    AND h.tool_name   = t2.tool_name
+    AND h.date        = t2.date
+  WHERE t2.date >= date_filter
+    AND t2.country_name = 'Argentina'
+  GROUP BY ALL
+)
+
+
+-- ============================================================================
+-- SALIDA FINAL
+-- ============================================================================
+SELECT
+  d.day,
+  d.is_partnership,
+  d.tool_name,
+  d.funnel,
+  d.campaign_id,
+  d.campaign_name,
+  d.advertiser_name,
+  d.cost_model,
+  d.product_name,
+  d.product_brand,
+  d.cpg_inferred,
+  d.master_category_lvl_one,
+  d.master_category_lvl_two,
+  d.master_category_lvl_three,
+  d.master_category_lvl_four,
+  -- d.budget_eur,
+  -- d.budget_lc,
+  -- d.days,
+  -- d.daily_budget_eur,
+  -- d.daily_budget_lc,
+  d.ad_spend_eur,
+  d.ad_spend_lc,
+  d.orders,
+  d.impressions,
+  d.viewed_impressions,
+  d.clicks,
+  d.revenue_eur,
+  d.revenue_lc,
+  d.sends,
+  d.opens,
+  tr.target                     AS target_roas
+FROM (
+  SELECT * FROM display_ads                   -- A: Display puro
+  UNION ALL
+  SELECT * FROM product_ads_with_spend        -- B: Product Ads completo
+  UNION ALL
+  SELECT * FROM product_ads_no_spend_products -- C.1: Precio fijo - productos
+  UNION ALL
+  SELECT * FROM product_ads_no_spend_campaign -- C.2: Precio fijo - spend campaña
+  UNION ALL
+  SELECT * FROM hybrid_campaign_metrics       -- D.1: Híbrida - upper funnel
+  UNION ALL
+  SELECT * FROM hybrid_product_revenue        -- D.2: Híbrida - revenue producto
+) AS d
+LEFT JOIN target_roas_map AS tr
+  ON tr.brand = LOWER(d.product_brand)
+;

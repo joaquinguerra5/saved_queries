@@ -1,0 +1,420 @@
+DECLARE date_from DATE DEFAULT DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY); 
+
+
+INSERT INTO `peya-food-and-groceries.automated_tables_reports.ms_insights_agg_campaign_performance`
+-- CREATE OR REPLACE TABLE `peya-food-and-groceries.automated_tables_reports.ms_insights_agg_campaign_performance`
+
+-- PARTITION BY date
+
+-- CLUSTER BY country_name,implemented_at, tool_name
+
+-- AS
+
+
+--------- CAMPAÑAS ACC ------------
+WITH acc AS (
+  WITH users AS (
+  Select distinct global_entity_id, date, campaign_id, sum(reach) as reach
+from
+ `fulfillment-dwh-production.curated_data_shared_adtech.display_ads_campaigns_daily` 
+WHERE
+  date >= date_from
+group by all
+),
+
+performance as 
+(SELECT
+  date,
+  ads.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  CASE
+    WHEN advertiser_type = 'chain' THEN chain_name
+    ELSE vendor_name
+  END as advertiser_name,
+  CASE
+    WHEN advertiser_type = 'chain' THEN chain_id
+    ELSE vendor_id
+  END as advertiser_id,
+  advertiser_type,
+  campaign_id,
+  campaign_name,
+  STRING(NULL) as cpg,
+  DATE(started_at) as started_at,
+  DATE(ended_at) as ended_at,
+  'acc' as implemented_at,
+  CASE
+    WHEN placement_screen IN ('shop_list') THEN 'Consideration'
+    WHEN placement_screen IN ('presearch','order_confirmation','home_presearch','home') THEN 'Awareness'
+    ELSE 'Otros'
+  END as funnel,
+  CASE placement_screen
+    WHEN 'shop_list' THEN 'Food Banner'
+    WHEN 'presearch' THEN 'Presearch'
+    WHEN 'order_confirmation' THEN 'Banner Order Status'
+    WHEN 'home_presearch' THEN 'Presearch'
+    WHEN 'home' THEN 'Home Banner'
+    ELSE 'Otros'
+  END as tool_name,
+  product as tool_type,
+  CASE
+    WHEN campaign_name LIKE 'MS_%'THEN 1
+    WHEN  campaign_name LIKE 'PS_%'THEN 1
+    ELSE 0
+  END as is_partnership,
+  cost_model,
+  price as price_theo,
+  MAX(total_budget_local) as total_budget_local,
+  MAX(SAFE_DIVIDE(total_budget_local,rate_eu)) as total_budget_eur,
+  SUM(budget_spent_local) as ad_spend_local,
+  SUM(SAFE_DIVIDE(budget_spent_local,rate_eu)) as ad_spend_eur,
+  SUM(loaded_impressions_count) as loaded_impressions,
+  SUM(viewable_impressions_count) as viewable_impressions,
+  SUM(clicks_count) as clicks,
+  SUM(orders_count) as orders,
+  SUM(gmv_local) as gmv_local,
+  SUM(SAFE_DIVIDE(gmv_local,rate_eu)) as gmv_eur,
+  0 as units,
+  0 as sends,
+  0 as opens
+FROM
+  `fulfillment-dwh-production.curated_data_shared_adtech.display_ads_creatives_daily` ads
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.global_entity_id = ads.global_entity_id
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_partner` dp
+ON
+  SAFE_CAST(dp.partner_id AS STRING) = ads.vendor_id
+LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_currency_exchange` AS dim_currency_exchange
+ON
+  dim_currency_exchange.currency_exchange_date = DATE_TRUNC(ads.date, month)
+  AND dim_currency_exchange.currency_id = dc.currency_id
+WHERE
+  placement_screen IS NOT NULL
+AND
+  ads.date >= date_from
+GROUP BY
+  ALL
+)
+
+SELECT
+  performance.*,
+  users.reach as reach,
+FROM
+  performance
+LEFT JOIN
+  users
+USING(date,campaign_id)
+
+
+
+),
+
+--------- CAMPAÑAS DH ADS ------------
+dh_ads AS (
+  SELECT
+  date,
+  ads.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  account_name as advertiser_name,
+  account_id as advertiser_id,
+  account_type as advertiser_type,
+  campaign_id,
+  campaign_name,
+  STRING(NULL) as cpg,
+  DATE(campaign_start_date) as started_at,
+  DATE(campaign_end_date) as ended_at,
+  'dh_ads' as implemented_at,
+  CASE
+    WHEN (REGEXP_CONTAINS(lower(campaign_name),'upselling') OR campaign_type = 'AD_FORMAT_PRODUCT_AD') THEN 'Conversion'
+    ELSE 'Consideration'
+  END as funnel,
+  CASE 
+    WHEN REGEXP_CONTAINS(lower(campaign_name),'upselling') THEN 'Upselling'
+    WHEN asset_type = 'AD_TYPE_SEARCH' AND placement = 'SCREEN_VENDOR_HOME' THEN 'Keyword Search'
+    WHEN asset_type = 'AD_TYPE_LISTING' AND placement = 'SCREEN_SUB_CATEGORY' THEN 'Sponsored Products'
+    WHEN asset_type = 'AD_TYPE_BANNER_SHOPPABLE' THEN 'Shoppable Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_NO_ACTION' AND placement = 'SCREEN_VENDOR_HOME' THEN 'Vendor Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_VENDOR_HOME' THEN 'Vendor Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_CATEGORY' THEN 'Category Banner'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_VERTICAL_HOME_PRESEARCH' THEN 'QC Presearch'
+    WHEN asset_type = 'AD_TYPE_BANNER_LANDING' AND placement = 'SCREEN_VERTICAL_HOME' THEN 'Vertical Banner'
+    ELSE 'Otros'
+  END as tool_name,
+  CASE campaign_type
+    WHEN 'AD_FORMAT_PRODUCT_AD' THEN 'product_ads'
+    WHEN 'AD_FORMAT_DISPLAY_AD' THEN 'display_ads'
+  END as tool_type,
+  CASE
+    WHEN campaign_name LIKE 'MS_%'THEN 1
+    WHEN  campaign_name LIKE 'PS_%'THEN 1
+    ELSE 0
+  END as is_partnership,
+  CASE campaign_type
+    WHEN 'AD_FORMAT_PRODUCT_AD' THEN 'cpc'
+    WHEN 'AD_FORMAT_DISPLAY_AD' THEN 'cpm'
+  END as cost_model,
+  0 as price_theo,
+  MAX(campaign_budget) as total_budget_local,
+  MAX(SAFE_DIVIDE(campaign_budget,rate_eu)) as total_budget_eur,
+  SUM(ad_spend) as ad_spend_local,
+  SUM(SAFE_DIVIDE(ad_spend,rate_eu)) as ad_spend_eur,
+  SUM(impressions) as loaded_impressions,
+  0 AS viewable_impressions,
+  SUM(total_clicks) as clicks,
+  SUM(campaign_orders) as orders,
+  SUM(sales_revenue) as gmv_local,
+  SUM(SAFE_DIVIDE(sales_revenue,rate_eu)) as gmv_eur,
+  SUM(unit_sold) as units,
+  0 as sends,
+  0 as opens,
+  0 as reach,
+FROM
+  `peya-data-origins-pro.cl_adtech.qcadtech_agg_dmp_v2` ads
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.global_entity_id = ads.global_entity_id
+LEFT JOIN
+    `peya-bi-tools-pro.il_core.dim_currency_exchange` AS dim_currency_exchange
+ON
+  dim_currency_exchange.currency_exchange_date = DATE_TRUNC(ads.date, month)
+  AND dim_currency_exchange.currency_id = dc.currency_id
+WHERE
+  date >= date_from
+-- AND
+--   placement = 'SCREEN_VERTICAL_HOME_PRESEARCH'
+-- -- AND
+-- --   asset_type = 'SCREEN_CATEGORY'
+-- AND
+--   campaign_id = '691f1f5f586261a2623da526'
+-- AND
+--   product_orders = campaign_orders
+GROUP BY
+  ALL
+),
+
+
+--------- CAMPAÑAS BRAZE ------------
+braze AS 
+(
+  WITH email as
+(
+SELECT
+  week as date,
+  dc.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  STRING(NULL) as advertiser_name,
+  STRING(NULL) as advertiser_id,
+  STRING(NULL) as advertiser_type,
+  group_id as campaign_id,
+  group_name as campaign_name,
+  STRING(NULL) as cpg,
+  DATE(NULL) as started_at,
+  DATE(NULL) as ended_at,
+  'braze' as implemented_at,
+  'Awareness' as funnel,
+  'Email' as tool_name,
+  'off_app' as tool_type,
+  CASE
+    WHEN ms.group_id IS NOT NULL THEN 1
+    WHEN REGEXP_CONTAINS(lower(b.group_name),r'partnership|partnerships') THEN 1
+    ELSE 0
+  END as is_partnership,
+  'fixed' as cost_model,
+  0 as price_theo,
+  0 as total_budget_local,
+  0 as total_budget_eur,
+  0 as ad_spend_local,
+  0 as ad_spend_eur,
+  0 as loaded_impressions,
+  0 as viewable_imppressions,
+  SUM(email_click) as clicks,
+  0 as orders,
+  0 as gmv_local,
+  0 as gmv_eur,
+  0 as units,
+  SUM(email_send) as sends,
+  SUM(email_open) as opens,
+  0 as reach
+FROM
+  `peya-datamarts-pro.dm_growth.consolidated_comms_week` b
+LEFT JOIN
+  (SELECT DISTINCT group_id FROM `peya-datamarts-pro.dm_growth.consolidated_comms_week` WHERE (split_name LIKE 'MS%' OR (canvas_step_name LIKE '%MS%')) AND canvas_step_name NOT LIKE '%MSE%') ms
+USING(group_id)
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.country_id = b.country_id
+WHERE
+  email_flag
+AND
+  b.week >= date_from
+GROUP BY
+  ALL
+),
+
+inapp AS (
+
+SELECT
+  week as date,
+  dc.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  STRING(NULL) as advertiser_name,
+  STRING(NULL) as advertiser_id,
+  STRING(NULL) as advertiser_type,
+  group_id as campaign_id,
+  group_name as campaign_name,
+  STRING(NULL) as cpg,
+  DATE(NULL) as started_at,
+  DATE(NULL) as ended_at,
+  'braze' as implemented_at,
+  'Awareness' as funnel,
+  'IAM' as tool_name,
+  'off_app' as tool_type,
+  CASE
+    WHEN ms.group_id IS NOT NULL THEN 1
+    WHEN REGEXP_CONTAINS(lower(b.group_name),r'partnership|partnerships') THEN 1
+    ELSE 0
+  END as is_partnership,
+  'fixed' as cost_model,
+  0 as price_theo,
+  0 as total_budget_local,
+  0 as total_budget_eur,
+  0 as ad_spend_local,
+  0 as ad_spend_eur,
+  SUM(inapp_message_impression) as loaded_impressions,
+  0 as viewable_imppressions,
+  SUM(inapp_message_click) as clicks,
+  0 as orders,
+  0 as gmv_local,
+  0 as gmv_eur,
+  0 as units,
+  0 as sends,
+  0 as opens,
+  0 as reach
+FROM
+  `peya-datamarts-pro.dm_growth.consolidated_comms_week` b
+LEFT JOIN
+  (SELECT DISTINCT group_id FROM `peya-datamarts-pro.dm_growth.consolidated_comms_week` WHERE (split_name LIKE 'MS%' OR (canvas_step_name LIKE '%MS%')) AND canvas_step_name NOT LIKE '%MSE%') ms
+USING(group_id)
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.country_id = b.country_id
+WHERE
+  inapp_flag
+AND
+  b.week >= date_from
+GROUP BY
+  ALL
+),
+
+push AS (
+
+SELECT
+  week as date,
+  dc.global_entity_id,
+  dc.country_code,
+  dc.country_name,
+  STRING(NULL) as advertiser_name,
+  STRING(NULL) as advertiser_id,
+  STRING(NULL) as advertiser_type,
+  group_id as campaign_id,
+  group_name as campaign_name,
+  STRING(NULL) as cpg,
+  DATE(NULL) as started_at,
+  DATE(NULL) as ended_at,
+  'braze' as implemented_at,
+  'Awareness' as funnel,
+  'Push' as tool_name,
+  'off_app' as tool_type,
+  CASE
+    WHEN ms.group_id IS NOT NULL THEN 1
+    WHEN REGEXP_CONTAINS(lower(b.group_name),r'partnership|partnerships') THEN 1
+    ELSE 0
+  END as is_partnership,
+  'fixed' as cost_model,
+  0 as price_theo,
+  0 as total_budget_local,
+  0 as total_budget_eur,
+  0 as ad_spend_local,
+  0 as ad_spend_eur,
+  0 as loaded_impressions,
+  0 as viewable_imppressions,
+  0 as clicks,
+  0 as orders,
+  0 as gmv_local,
+  0 as gmv_eur,
+  0 as units,
+  SUM(push_notify_send) as sends,
+  SUM(push_notify_open) as opens,
+  0 as reach
+FROM
+  `peya-datamarts-pro.dm_growth.consolidated_comms_week` b
+LEFT JOIN
+  (SELECT DISTINCT group_id FROM `peya-datamarts-pro.dm_growth.consolidated_comms_week` WHERE (split_name LIKE 'MS%' OR (canvas_step_name LIKE '%MS%')) AND canvas_step_name NOT LIKE '%MSE%') ms
+USING(group_id)
+LEFT JOIN
+  `peya-bi-tools-pro.il_core.dim_country` dc
+ON
+  dc.country_id = b.country_id
+WHERE
+  push_flag
+AND
+  b.week >= date_from
+GROUP BY
+  ALL
+)
+
+
+
+SELECT
+  *
+FROM
+  email
+-- WHERE
+--   campaign_name = 'DMA_MA_250221_AR_PY_DMO_COMMS-ORG-Danone-Ser-Mail-DMART_PARTNERSHIP_CAN'
+
+UNION ALL
+
+SELECT
+  *
+FROM
+  inapp
+
+UNION ALL
+
+SELECT
+  *
+FROM
+  push
+-- WHERE
+--   campaign_name = 'EAT_AUT_250207_AR_PY_RET_COMMS-ORG-Knorr-LUNCH _PROMO_CAN_CRM'
+
+)
+
+SELECT
+  *
+FROM
+  acc
+
+UNION ALL
+
+SELECT
+  *
+FROM
+  dh_ads
+
+UNION ALL
+
+SELECT
+  *
+FROM
+  braze
